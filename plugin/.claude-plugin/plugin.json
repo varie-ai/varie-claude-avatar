@@ -1,0 +1,20 @@
+{
+  "name": "varie-avatar",
+  "version": "1.0.0",
+  "description": "Animated character companion that reacts to Claude Code events with expressions and notifications",
+  "author": {
+    "name": "Varie",
+    "email": "dev@varie.ai"
+  },
+  "homepage": "https://varie.ai",
+  "license": "MIT",
+  "keywords": [
+    "avatar",
+    "companion",
+    "animation",
+    "character",
+    "desktop",
+    "overlay",
+    "notifications"
+  ]
+}

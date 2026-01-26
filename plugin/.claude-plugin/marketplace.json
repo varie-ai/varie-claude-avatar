@@ -1,0 +1,9 @@
+{
+  "name": "varie-avatar-local",
+  "plugins": [
+    {
+      "name": "varie-avatar",
+      "path": "."
+    }
+  ]
+}

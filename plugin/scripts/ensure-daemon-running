@@ -1,0 +1,108 @@
+#!/bin/bash
+# Ensure the Varie Claude Avatar daemon is running
+# Called by SessionStart hook to auto-launch the companion
+
+SOCKET="/tmp/varie-claude-avatar.sock"
+DAEMON_JSON="$HOME/.varie-claude-avatar/daemon.json"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INSTALL_SCRIPT="$SCRIPT_DIR/install-daemon"
+
+# Check if daemon is already running: socket exists AND PID is alive
+if [[ -S "$SOCKET" ]]; then
+  if [[ -f "$DAEMON_JSON" ]]; then
+    PID=$(grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9]*' "$DAEMON_JSON" | grep -o '[0-9]*')
+    if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+      exit 0
+    fi
+  fi
+  # Stale socket from crashed daemon — clean up
+  rm -f "$SOCKET"
+fi
+
+# Find and launch daemon based on OS
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  # macOS - check for packaged app
+  APP_PATH=""
+  for candidate in \
+    "/Applications/Varie Claude Avatar.app" \
+    "$HOME/Applications/Varie Claude Avatar.app"; do
+    if [[ -d "$candidate" ]]; then
+      APP_PATH="$candidate"
+      break
+    fi
+  done
+
+  if [[ -n "$APP_PATH" ]]; then
+    # Launch in background, hidden (-g = don't bring to front, -j = launch hidden)
+    open -g -j "$APP_PATH" &
+  else
+    # Not installed as app — try dev mode (running from source)
+    DEV_ELECTRON="${CLAUDE_PLUGIN_ROOT}/../daemon/node_modules/.bin/electron"
+    DEV_APP="${CLAUDE_PLUGIN_ROOT}/../daemon"
+
+    if [[ -f "$DEV_ELECTRON" ]]; then
+      nohup "$DEV_ELECTRON" "$DEV_APP" >/dev/null 2>&1 &
+    else
+      # Not installed — auto-download in background
+      echo "[varie-avatar] Daemon not found. Downloading in background — it'll be ready next session."
+      echo "[varie-avatar] Or download manually: https://github.com/varie-ai/varie-claude-avatar/releases"
+      nohup "$INSTALL_SCRIPT" >/dev/null 2>&1 &
+      exit 0
+    fi
+  fi
+
+elif [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || "$OSTYPE" == "win32"* ]]; then
+  # Windows
+  APP="$LOCALAPPDATA/Programs/Varie Claude Avatar/Varie Claude Avatar.exe"
+
+  if [[ -f "$APP" ]]; then
+    "$APP" &
+  else
+    DEV_ELECTRON="${CLAUDE_PLUGIN_ROOT}/../daemon/node_modules/.bin/electron"
+    DEV_APP="${CLAUDE_PLUGIN_ROOT}/../daemon"
+    if [[ -f "$DEV_ELECTRON" ]]; then
+      "$DEV_ELECTRON" "$DEV_APP" &
+    else
+      echo "[varie-avatar] Daemon not found. Downloading in background — it'll be ready next session."
+      echo "[varie-avatar] Or download manually: https://github.com/varie-ai/varie-claude-avatar/releases"
+      nohup "$INSTALL_SCRIPT" >/dev/null 2>&1 &
+      exit 0
+    fi
+  fi
+
+elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  # Linux
+  APP=""
+  for path in "/usr/bin/varie-claude-avatar" "/opt/Varie Claude Avatar/varie-claude-avatar" "$HOME/.local/bin/varie-claude-avatar"; do
+    if [[ -f "$path" ]]; then
+      APP="$path"
+      break
+    fi
+  done
+
+  if [[ -n "$APP" ]]; then
+    nohup "$APP" >/dev/null 2>&1 &
+  else
+    DEV_ELECTRON="${CLAUDE_PLUGIN_ROOT}/../daemon/node_modules/.bin/electron"
+    DEV_APP="${CLAUDE_PLUGIN_ROOT}/../daemon"
+    if [[ -f "$DEV_ELECTRON" ]]; then
+      nohup "$DEV_ELECTRON" "$DEV_APP" >/dev/null 2>&1 &
+    else
+      echo "[varie-avatar] Daemon not found. Downloading in background — it'll be ready next session."
+      echo "[varie-avatar] Or download manually: https://github.com/varie-ai/varie-claude-avatar/releases"
+      nohup "$INSTALL_SCRIPT" >/dev/null 2>&1 &
+      exit 0
+    fi
+  fi
+fi
+
+# Wait for socket to appear (max 5s, check every 250ms)
+for i in $(seq 1 20); do
+  if [[ -S "$SOCKET" ]]; then
+    exit 0
+  fi
+  sleep 0.25
+done
+
+# Daemon didn't start in time — exit anyway, don't block Claude Code
+exit 0

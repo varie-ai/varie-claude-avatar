@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Electron packaged builds
+release/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+debug.log
+
+# Local development
+*.local.md
+.env
+.env.local
+
+# Test files
+test-*.txt
