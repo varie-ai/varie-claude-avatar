@@ -91,4 +91,6 @@ jobs:
             - **macOS (Apple Silicon):** `*-arm64.dmg`
             - **macOS (Intel):** `*-x64.dmg`
 
-            This build is signed and notarized by Apple.
+            This build is code-signed. If macOS blocks it on first launch:
+            - **macOS 14 and earlier:** Right-click the app → Open → click Open
+            - **macOS 15 (Sequoia):** System Settings → Privacy & Security → "Open Anyway"

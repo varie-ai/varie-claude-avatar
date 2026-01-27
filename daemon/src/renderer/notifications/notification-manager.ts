@@ -1,3 +1,6 @@
+import { SessionColorAssigner, ColorVariant } from './session-color-theme';
+import { SpreadLayoutEngine, SpreadNotificationInfo, NotificationSlot } from './spread-layout';
+
 export interface NotificationData {
   type: 'approval' | 'complete' | 'info' | 'attention' | 'question';
   title: string;
@@ -32,10 +35,62 @@ export class NotificationManager {
   private notificationElement: HTMLElement | null = null;
   private idCounter = 0;
 
+  // Spread mode
+  private spreadMode = true;
+  private spreadElements: Map<string, HTMLElement> = new Map();
+  private colorAssigner = new SessionColorAssigner();
+  private layoutEngine = new SpreadLayoutEngine();
+  private currentScale = 1.0;
+  private onDisplayChanged: (() => void) | null = null;
+
   constructor(container: HTMLElement) {
     this.container = container;
     // Get #app element for approval notifications - it doesn't have transform so position:fixed works correctly
     this.appElement = document.getElementById('app') || container;
+  }
+
+  setSpreadMode(enabled: boolean): void {
+    if (this.spreadMode === enabled) return;
+    this.spreadMode = enabled;
+    // Clear current display, then re-render in the new mode
+    this.clearAllDisplayElements();
+    this.updateNotificationDisplay();
+  }
+
+  getSpreadMode(): boolean {
+    return this.spreadMode;
+  }
+
+  setScale(scale: number): void {
+    this.currentScale = scale;
+    if (this.spreadMode) {
+      this.updateNotificationDisplay();
+    }
+  }
+
+  setOnDisplayChanged(callback: () => void): void {
+    this.onDisplayChanged = callback;
+  }
+
+  getVisibleSessionCount(): number {
+    const sessions = new Set<string>();
+    for (const n of this.pendingNotifications.values()) {
+      sessions.add(n.sessionId);
+    }
+    return sessions.size;
+  }
+
+  private clearAllDisplayElements(): void {
+    // Clear stacked mode element
+    if (this.notificationElement) {
+      this.notificationElement.remove();
+      this.notificationElement = null;
+    }
+    // Clear spread mode elements
+    for (const el of this.spreadElements.values()) {
+      el.remove();
+    }
+    this.spreadElements.clear();
   }
 
   show(data: NotificationData): string {
@@ -80,6 +135,21 @@ export class NotificationManager {
   }
 
   private updateNotificationDisplay(): void {
+    if (this.spreadMode) {
+      this.updateSpreadDisplay();
+    } else {
+      this.updateStackedDisplay();
+    }
+    this.onDisplayChanged?.();
+  }
+
+  // ── Stacked mode (original behavior + session color) ──────────────
+
+  private updateStackedDisplay(): void {
+    // Clear any spread elements
+    for (const el of this.spreadElements.values()) el.remove();
+    this.spreadElements.clear();
+
     const notifications = Array.from(this.pendingNotifications.values());
     const count = notifications.length;
 
@@ -106,6 +176,10 @@ export class NotificationManager {
     // Build element completely BEFORE adding to DOM
     const element = document.createElement('div');
     element.className = 'notification approval';
+
+    // Apply session color
+    const color = this.colorAssigner.getVariant(latest.sessionId, 'normal');
+    this.applyColor(element, color, latest.tool);
 
     const projectDisplay = this.formatProject(latest.project);
     const toolDisplay = latest.tool || 'Action';
@@ -150,7 +224,157 @@ export class NotificationManager {
     this.appElement.appendChild(element);
     this.notificationElement = element;
 
-    console.log('[NotificationManager] Notification displayed:', idToRemove);
+    console.log('[NotificationManager] Stacked notification displayed:', idToRemove);
+  }
+
+  // ── Spread mode (per-notification positioned elements) ────────────
+
+  private updateSpreadDisplay(): void {
+    // Clear stacked element
+    if (this.notificationElement) {
+      this.notificationElement.remove();
+      this.notificationElement = null;
+    }
+
+    const notifications = Array.from(this.pendingNotifications.values());
+
+    if (notifications.length === 0) {
+      for (const el of this.spreadElements.values()) {
+        el.classList.add('hiding');
+        setTimeout(() => el.remove(), 300);
+      }
+      this.spreadElements.clear();
+      return;
+    }
+
+    // Build layout
+    const infos: SpreadNotificationInfo[] = notifications.map(n => ({
+      id: n.id,
+      sessionId: n.sessionId,
+      timestamp: n.timestamp,
+    }));
+    const layout = this.layoutEngine.calculateLayout(infos, this.currentScale);
+
+    // Remove elements no longer in layout
+    const layoutIds = new Set(layout.keys());
+    for (const [id, el] of this.spreadElements) {
+      if (!layoutIds.has(id)) {
+        el.classList.add('hiding');
+        const toRemove = el;
+        setTimeout(() => toRemove.remove(), 300);
+        this.spreadElements.delete(id);
+      }
+    }
+
+    // Create or update elements for each notification in layout
+    for (const [id, slot] of layout) {
+      const notification = this.pendingNotifications.get(id);
+      if (!notification) continue;
+
+      let element = this.spreadElements.get(id);
+      const isNew = !element;
+
+      if (isNew) {
+        element = this.createSpreadElement(notification);
+        this.appElement.appendChild(element);
+        this.spreadElements.set(id, element);
+      }
+
+      // Apply position
+      this.applySlot(element!, slot);
+
+      // Apply session color (top card gets normal, background cards get darker)
+      const variant = slot.isTopCard ? 'normal' : 'darker';
+      const color = this.colorAssigner.getVariant(notification.sessionId, variant);
+      this.applyColor(element!, color, notification.tool);
+
+      // Card stack: top card gets count badge when session has 2+ notifications
+      if (slot.isTopCard && slot.totalInGroup >= 2) {
+        this.ensureSpreadBadge(element!, slot.totalInGroup);
+      } else {
+        this.removeSpreadBadge(element!);
+      }
+
+      // Background cards get reduced visual prominence
+      element!.classList.toggle('spread-bg-card', !slot.isTopCard);
+    }
+
+    console.log('[NotificationManager] Spread display updated:', layout.size, 'notifications');
+  }
+
+  private createSpreadElement(notification: PendingNotification): HTMLElement {
+    const element = document.createElement('div');
+    element.className = 'notification approval spread-item';
+    element.id = notification.id;
+
+    const projectDisplay = this.formatProject(notification.project);
+    const toolDisplay = notification.tool || 'Action';
+    const summaryDisplay = this.formatSummary(notification.summary, notification.tool);
+
+    element.innerHTML = `
+      <div class="notification-header">
+        <span class="notification-project">${projectDisplay}</span>
+      </div>
+      <div class="notification-content">
+        <span class="notification-summary">${summaryDisplay}</span>
+      </div>
+      <div class="notification-actions">
+        <span class="notification-tool">${toolDisplay}</span>
+        ${toolDisplay === 'Plan' ? '<span class="notification-action-tag">Approval</span>' : ''}
+        <button class="btn-dismiss">Dismiss</button>
+      </div>
+    `;
+
+    const idToRemove = notification.id;
+
+    const dismissBtn = element.querySelector('.btn-dismiss');
+    if (dismissBtn) {
+      dismissBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.pendingNotifications.delete(idToRemove);
+        this.updateNotificationDisplay();
+      });
+    }
+
+    element.addEventListener('click', () => {
+      this.pendingNotifications.delete(idToRemove);
+      this.updateNotificationDisplay();
+    });
+
+    return element;
+  }
+
+  private applySlot(element: HTMLElement, slot: NotificationSlot): void {
+    element.style.top = `${slot.top}px`;
+    element.style.left = slot.left;
+    element.style.transform = slot.transform;
+    element.style.zIndex = String(slot.zIndex);
+  }
+
+  private applyColor(element: HTMLElement, color: ColorVariant, tool: string): void {
+    element.style.borderColor = color.border;
+    element.style.background = color.background;
+    // Apply to tool badge if it exists
+    const toolBadge = element.querySelector('.notification-tool') as HTMLElement | null;
+    if (toolBadge) {
+      toolBadge.style.background = color.toolBadge;
+      toolBadge.style.color = color.toolText;
+    }
+  }
+
+  private ensureSpreadBadge(element: HTMLElement, count: number): void {
+    let badge = element.querySelector('.spread-count-badge') as HTMLElement | null;
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'spread-count-badge';
+      element.appendChild(badge);
+    }
+    badge.textContent = String(count);
+  }
+
+  private removeSpreadBadge(element: HTMLElement): void {
+    const badge = element.querySelector('.spread-count-badge');
+    if (badge) badge.remove();
   }
 
   private formatProject(project: string): string {
@@ -273,6 +497,7 @@ export class NotificationManager {
       }
     }
     if (changed) {
+      this.colorAssigner.removeSession(sessionId);
       this.updateNotificationDisplay();
     }
   }

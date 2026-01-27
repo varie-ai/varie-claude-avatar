@@ -39,7 +39,7 @@
       top: 8px;
       left: 50%;
       transform: translateX(-50%);
-      z-index: 1100;
+      z-index: 1200; /* Above spread items (1100-1112) */
       pointer-events: auto;
       display: flex;
       flex-direction: column;
@@ -79,7 +79,7 @@
       max-width: 340px;
       max-height: 160px;
       text-align: left;
-      z-index: 1100;
+      z-index: 1200; /* Above spread items (1100-1112); overridden inline for spread-item */
       -webkit-app-region: no-drag; /* Allow clicks - parent #app has drag */
       cursor: pointer;
     }
@@ -231,7 +231,7 @@
       min-width: 210px;
       max-width: 310px;
       text-align: left;
-      z-index: 1100;
+      z-index: 1200; /* Above spread items (1100-1112) */
       -webkit-app-region: no-drag;
     }
 
@@ -269,7 +269,7 @@
       top: 21px;
       left: 50%;
       transform: translateX(-50%);
-      z-index: 1100;
+      z-index: 1200; /* Above spread items (1100-1112) */
       animation: fadeIn 0.3s ease-out;
       cursor: pointer;
     }
@@ -387,6 +387,42 @@
 
     #btn-close:hover {
       background: #e53935;
+    }
+
+    #btn-spread.active {
+      color: #4fc3f7;
+      background: rgba(79, 195, 247, 0.25);
+    }
+
+    /* Spread-mode: individually positioned notifications with smooth transitions */
+    .notification.spread-item {
+      position: fixed;
+      transition: top 0.3s ease-out, left 0.3s ease-out;
+    }
+
+    /* Spread card-stack: background cards (behind the top card) */
+    .notification.spread-item.spread-bg-card {
+      opacity: 0.55;
+      pointer-events: none; /* Only the top card is interactive */
+    }
+
+    /* Spread card-stack: count badge on top card */
+    .spread-count-badge {
+      position: absolute;
+      top: -6px;
+      right: -6px;
+      min-width: 18px;
+      height: 18px;
+      background: #ff4444;
+      border-radius: 9px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: bold;
+      color: white;
+      padding: 0 4px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.3);
     }
 
     /* Scale dropdown — CSS transform scaling preserves MSAA */
@@ -551,6 +587,7 @@
           <button class="scale-option" data-scale="1.2">L</button>
         </div>
       </div>
+      <button id="btn-spread" title="Clean mode (stack notifications)">⊕</button>
       <button id="btn-minimize" title="Minimize">−</button>
       <button id="btn-close" title="Close">×</button>
     </div>

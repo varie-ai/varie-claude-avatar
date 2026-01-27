@@ -5,9 +5,12 @@
 An animated character companion for [Claude Code](https://claude.ai/code) that lives as a desktop overlay, reacting to your coding sessions with expressions and notifications.
 
 <p>
-  <img src="screenshots/notification.png" width="250" alt="Approval notification with character" />
-  <img src="screenshots/stats.png" width="250" alt="Stats panel showing session counts" />
+  <img src="screenshots/notification.png" width="220" alt="Approval notification with character" />
+  <img src="screenshots/stats.png" width="220" alt="Stats panel showing session counts" />
+  <img src="screenshots/notification_spread.png" width="220" alt="Multi-session notifications spread around the character" />
 </p>
+
+*Approval notifications · Session stats · ...or when you push Claude Code a little too hard across sessions*
 
 Pick from a library of characters — or [create your own](https://varie.ai) — and launch it alongside Claude Code. The avatar shows expressions as tools run, keeps you on top of notifications across multiple sessions, and tracks your usage stats at a glance.
 
@@ -61,7 +64,7 @@ The desktop app will be updated separately from [Releases](https://github.com/va
 
 ### Gatekeeper Note (macOS)
 
-The desktop app is currently unsigned. If you install manually via browser download, macOS may block it on first launch:
+The desktop app is code-signed but not yet notarized. If macOS blocks it on first launch:
 - **macOS 14 and earlier:** Right-click the app → Open → click Open
 - **macOS 15 (Sequoia):** System Settings → Privacy & Security → scroll down → click "Open Anyway"
 
@@ -132,7 +135,7 @@ Click the pin button to keep the panel visible. Click reload to reset the active
 | Platform | Status | Install Path |
 |----------|--------|-------------|
 | macOS (Apple Silicon) | Supported | `~/Applications/` or `/Applications/` |
-| macOS (Intel) | Coming soon | — |
+| macOS (Intel) | Supported | `~/Applications/` or `/Applications/` |
 | Windows | Planned | `%LOCALAPPDATA%/Programs/` |
 | Linux | Planned | `~/.local/bin/` |
 

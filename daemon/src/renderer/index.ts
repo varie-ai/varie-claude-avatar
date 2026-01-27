@@ -23,6 +23,9 @@ class App {
   private characterContainer: HTMLElement;
   private activeCharacterId: string = 'vespera_b02d095ae396';
   private currentScale: number = 1.0;
+  private spreadModeEnabled = true;
+  private spreadExpressionActive = false;
+  private eventExpressionActive = false;
 
   constructor() {
     this.characterContainer = document.getElementById('character-container') as HTMLElement;
@@ -30,7 +33,84 @@ class App {
       document.getElementById('notification-container') as HTMLElement
     );
 
+    // Update expression when notifications change
+    this.notifications.setOnDisplayChanged(() => this.updateSpreadExpression());
+
     this.init();
+  }
+
+  /**
+   * Update character expression based on how many distinct sessions
+   * have visible notifications. Only active in spread mode.
+   * Yields to event expressions — only plays when no event expression is active.
+   */
+  private updateSpreadExpression(): void {
+    if (!this.spreadModeEnabled) {
+      if (this.spreadExpressionActive) {
+        this.character?.clearExpression();
+        this.spreadExpressionActive = false;
+      }
+      return;
+    }
+
+    // Don't override an active event expression
+    if (this.eventExpressionActive) return;
+
+    const sessionCount = this.notifications.getVisibleSessionCount();
+
+    if (sessionCount >= 5) {
+      this.character?.setExpression('sad');
+      this.spreadExpressionActive = true;
+    } else if (sessionCount >= 3) {
+      this.character?.setExpression('angry');
+      this.spreadExpressionActive = true;
+    } else if (this.spreadExpressionActive) {
+      this.character?.clearExpression();
+      this.spreadExpressionActive = false;
+    }
+  }
+
+  /**
+   * Set expression for a per-event reaction.
+   * - Ignores if another event expression is already playing (no override).
+   * - Can override spread expressions (event expressions take priority).
+   * - Self-clears after a randomized 2-3s duration.
+   * - On clear, lets spread expression reclaim if conditions are met.
+   */
+  private setEventExpression(expression: string): void {
+    // Don't override if another event expression is currently playing
+    if (this.eventExpressionActive) return;
+
+    // Event expressions can override spread expressions
+    this.spreadExpressionActive = false;
+    this.eventExpressionActive = true;
+    this.character?.setExpression(expression);
+
+    // Self-clear after randomized 2-3 second duration
+    const duration = 2000 + Math.random() * 1000;
+    setTimeout(() => {
+      this.eventExpressionActive = false;
+      // Let spread expression reclaim if conditions are met
+      this.updateSpreadExpression();
+      // If no spread expression took over, clear
+      if (!this.spreadExpressionActive) {
+        this.character?.clearExpression();
+      }
+    }, duration);
+  }
+
+  /** Pick a random element from an array. */
+  private randomChoice<T>(options: T[]): T {
+    return options[Math.floor(Math.random() * options.length)];
+  }
+
+  /** Toggle between spread mode (default) and clean/stacked mode. */
+  toggleSpreadMode(): void {
+    this.spreadModeEnabled = !this.spreadModeEnabled;
+    this.notifications.setSpreadMode(this.spreadModeEnabled);
+    // Button lights up when in clean/stacked mode (non-default)
+    const btn = document.getElementById('btn-spread');
+    btn?.classList.toggle('active', !this.spreadModeEnabled);
   }
 
   private async init(): Promise<void> {
@@ -56,6 +136,7 @@ class App {
         this.currentScale = scale;
         this.characterContainer.style.height = `${Math.round(540 * scale)}px`;
         this.character?.setScale(scale);
+        this.notifications.setScale(scale);
       });
 
       // Apply initial scale to character container
@@ -63,7 +144,14 @@ class App {
       if (this.currentScale !== 1.0) {
         this.characterContainer.style.height = `${Math.round(540 * this.currentScale)}px`;
       }
+      this.notifications.setScale(this.currentScale);
     }
+
+    // Spread mode toggle button
+    const btnSpread = document.getElementById('btn-spread');
+    btnSpread?.addEventListener('click', () => {
+      this.toggleSpreadMode();
+    });
 
     // Set up mouse tracking for eye gaze
     this.setupMouseTracking();
@@ -165,16 +253,10 @@ class App {
             filePath: (event.metadata?.filePath as string) || undefined,
           },
         });
-        // Randomly choose between curious (?) and surprised (!)
-        const approvalExpressions = ['curious', 'surprised'];
-        const expr = approvalExpressions[Math.floor(Math.random() * approvalExpressions.length)];
-        this.character?.setExpression(expr);
+        this.setEventExpression(this.randomChoice(['curious', 'surprised']));
         this.character?.setSpeaking(true);
-        // Speaking duration: 1500ms base (+50%), with 30% variance (1050-1950ms)
         const approvalSpeakDuration = 1500 * (0.7 + Math.random() * 0.6);
         setTimeout(() => this.character?.setSpeaking(false), approvalSpeakDuration);
-        // Clear expression after 3 seconds
-        setTimeout(() => this.character?.clearExpression(), 3000);
         break;
 
       case 'tool_complete':
@@ -185,8 +267,7 @@ class App {
         if (completedTool) {
           this.notifications.dismissByToolAndSummary(completedTool, completedSummary, completedProjectPath);
         }
-        this.character?.setExpression('happy');
-        setTimeout(() => this.character?.clearExpression(), 2000);
+        this.setEventExpression(this.randomChoice(['happy', 'excited']));
         break;
 
       case 'stop':
@@ -197,14 +278,10 @@ class App {
           body: projectName ? `${projectName}: Claude finished` : 'Claude finished',
           sessionId: event.sessionId,
         });
-        this.character?.setExpression('happy');
+        this.setEventExpression(this.randomChoice(['happy', 'excited']));
         this.character?.setSpeaking(true);
-        // Speaking duration: 2250ms base (+50%), with 30% variance (1575-2925ms)
         const stopSpeakDuration = 2250 * (0.7 + Math.random() * 0.6);
-        setTimeout(() => {
-          this.character?.setSpeaking(false);
-          this.character?.clearExpression();
-        }, stopSpeakDuration);
+        setTimeout(() => this.character?.setSpeaking(false), stopSpeakDuration);
         break;
 
       case 'session_start':
@@ -232,15 +309,12 @@ class App {
           body: 'Claude needs attention!',
           sessionId: event.sessionId,
         });
-        // Show curious expression
-        this.character?.setExpression('curious');
-        setTimeout(() => this.character?.clearExpression(), 2000);
+        this.setEventExpression('curious');
         break;
 
       case 'subagent_stop':
-        // Subagent finished - brief happy expression, no notification (too noisy)
-        this.character?.setExpression('happy');
-        setTimeout(() => this.character?.clearExpression(), 1500);
+        // Subagent finished - brief positive expression, no notification (too noisy)
+        this.setEventExpression(this.randomChoice(['happy', 'excited']));
         break;
 
       case 'user_prompt':
@@ -251,10 +325,7 @@ class App {
         if (event.sessionId) {
           this.notifications.dismissBySession(event.sessionId);
         }
-        // Show "thinking" expression
-        this.character?.setExpression('curious');
-        // Clear after a short time (Claude will send other events as it works)
-        setTimeout(() => this.character?.clearExpression(), 2000);
+        this.setEventExpression('thoughtful');
         break;
 
       case 'attention':
@@ -272,9 +343,7 @@ class App {
           body: attentionProject ? `${attentionProject}: ${attentionBody}` : attentionBody,
           sessionId: event.sessionId,
         });
-        // Show curious expression briefly
-        this.character?.setExpression('curious');
-        setTimeout(() => this.character?.clearExpression(), 2000);
+        this.setEventExpression('curious');
         break;
 
       case 'question':
@@ -286,26 +355,22 @@ class App {
           body: (event.metadata?.summary as string) || 'Claude has a question for you',
           sessionId: event.sessionId,
         });
-        // Show curious expression
-        this.character?.setExpression('curious');
+        this.setEventExpression('curious');
         this.character?.setSpeaking(true);
         const questionSpeakDuration = 1500 * (0.7 + Math.random() * 0.6);
         setTimeout(() => this.character?.setSpeaking(false), questionSpeakDuration);
-        setTimeout(() => this.character?.clearExpression(), 3000);
         break;
 
       case 'plan_complete':
         // Plan was approved/rejected - dismiss plan notification
         this.notifications.dismissByType('plan');
-        this.character?.setExpression('happy');
-        setTimeout(() => this.character?.clearExpression(), 2000);
+        this.setEventExpression('happy');
         break;
 
       case 'question_complete':
         // Question was answered - dismiss question notification
         this.notifications.dismissByType('question');
-        this.character?.setExpression('happy');
-        setTimeout(() => this.character?.clearExpression(), 2000);
+        this.setEventExpression('happy');
         break;
     }
   }
