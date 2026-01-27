@@ -127,9 +127,13 @@ SUMMARY="${SUMMARY//$'\n'/\\n}"
 JSON="{\"type\":\"$EVENT\",\"tool\":\"$TOOL\",\"sessionId\":\"$SID\",\"timestamp\":$(date +%s)000,\"metadata\":{\"project\":\"$PROJECT\",\"projectPath\":\"$PROJECT_PATH\",\"summary\":\"$SUMMARY\"}}"
 
 # Write to socket in background subshell, completely detached
+# Retry up to 3 times with 0.5s delay — covers socket-not-ready race after daemon launch
 (
   exec >/dev/null 2>&1
-  echo "$JSON" | nc -w1 -U "$SOCKET" || true
+  for _attempt in 1 2 3; do
+    echo "$JSON" | nc -w1 -U "$SOCKET" && break
+    sleep 0.5
+  done
 ) </dev/null >/dev/null 2>&1 &
 
 exit 0

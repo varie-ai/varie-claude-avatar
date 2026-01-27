@@ -56,14 +56,21 @@ export class StatsTracker {
     }
   }
 
+  private localDateKey(d: Date): string {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
   private todayKey(): string {
-    return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    return this.localDateKey(new Date());
   }
 
   private cleanup(): void {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - 8);
-    const cutoffKey = cutoff.toISOString().slice(0, 10);
+    const cutoffKey = this.localDateKey(cutoff);
 
     let changed = false;
     for (const key of Object.keys(this.data.daily)) {
@@ -105,7 +112,7 @@ export class StatsTracker {
     // Sum last 7 days
     const weekStart = new Date();
     weekStart.setDate(weekStart.getDate() - 6); // today + 6 prior days = 7 days
-    const weekStartKey = weekStart.toISOString().slice(0, 10);
+    const weekStartKey = this.localDateKey(weekStart);
 
     let week = 0;
     const projectTotals: Record<string, number> = {};

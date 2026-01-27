@@ -21,10 +21,7 @@ interface PendingNotification {
   projectPath: string;
   summary: string;
   timestamp: number;
-  shown: boolean; // Whether notification is actually displayed
 }
-
-const AUTO_DISMISS_DELAY = 2000; // 2 seconds - if tool completes within this, auto-dismiss
 
 export class NotificationManager {
   private container: HTMLElement;
@@ -32,7 +29,6 @@ export class NotificationManager {
   private pendingNotifications: Map<string, PendingNotification> = new Map();
   private notificationElement: HTMLElement | null = null;
   private idCounter = 0;
-  private pendingTimers: Map<string, number> = new Map(); // Timers for delayed show
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -63,11 +59,10 @@ export class NotificationManager {
 
     console.log('[NotificationManager] Adding notification:', { id, sessionId, project, projectPath, tool, summary });
 
-    // Cancel any existing timer for this session (in case of rapid events)
-    this.cancelPendingTimer(sessionId);
-
-    // Add to pending notifications (not shown yet)
-    this.pendingNotifications.set(sessionId, {
+    // Add to pending notifications and show immediately.
+    // Dismissed when a matching tool_complete event arrives (dismissByToolAndSummary),
+    // when the session ends (dismissBySession), or by user click.
+    this.pendingNotifications.set(id, {
       id,
       sessionId,
       tool,
@@ -75,29 +70,16 @@ export class NotificationManager {
       projectPath,
       summary,
       timestamp: Date.now(),
-      shown: false,
     });
 
-    // Delay showing notification - if tool_complete comes quickly, we won't show it
-    const timerId = window.setTimeout(() => {
-      const notification = this.pendingNotifications.get(sessionId);
-      if (notification && !notification.shown) {
-        notification.shown = true;
-        console.log('[NotificationManager] Showing notification after delay (needs approval):', sessionId);
-        this.updateNotificationDisplay();
-      }
-      this.pendingTimers.delete(sessionId);
-    }, AUTO_DISMISS_DELAY);
-
-    this.pendingTimers.set(sessionId, timerId);
+    this.updateNotificationDisplay();
 
     return id;
   }
 
   private updateNotificationDisplay(): void {
-    // Only show notifications that have been marked as "shown"
-    const shownNotifications = Array.from(this.pendingNotifications.values()).filter(n => n.shown);
-    const count = shownNotifications.length;
+    const notifications = Array.from(this.pendingNotifications.values());
+    const count = notifications.length;
 
     if (count === 0) {
       if (this.notificationElement) {
@@ -111,7 +93,7 @@ export class NotificationManager {
       return;
     }
 
-    const latest = shownNotifications[shownNotifications.length - 1];
+    const latest = notifications[notifications.length - 1];
 
     // Remove old element immediately (no animation) when updating
     if (this.notificationElement) {
@@ -143,22 +125,22 @@ export class NotificationManager {
       </div>
     `;
 
-    // Capture sessionId for click handler closure
-    const sessionIdToRemove = latest.sessionId;
+    // Capture id for click handler closure
+    const idToRemove = latest.id;
 
     // Add dismiss handler to button BEFORE adding to DOM
     const dismissBtn = element.querySelector('.btn-dismiss');
     if (dismissBtn) {
       dismissBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        this.pendingNotifications.delete(sessionIdToRemove);
+        this.pendingNotifications.delete(idToRemove);
         this.updateNotificationDisplay();
       });
     }
 
     // Also dismiss on click anywhere on notification
     element.addEventListener('click', () => {
-      this.pendingNotifications.delete(sessionIdToRemove);
+      this.pendingNotifications.delete(idToRemove);
       this.updateNotificationDisplay();
     });
 
@@ -166,7 +148,7 @@ export class NotificationManager {
     this.appElement.appendChild(element);
     this.notificationElement = element;
 
-    console.log('[NotificationManager] Notification displayed for session:', sessionIdToRemove);
+    console.log('[NotificationManager] Notification displayed:', idToRemove);
   }
 
   private formatProject(project: string): string {
@@ -275,28 +257,20 @@ export class NotificationManager {
   }
 
   dismiss(id: string): void {
-    for (const [sessionId, notification] of this.pendingNotifications) {
-      if (notification.id === id) {
-        this.cancelPendingTimer(sessionId);
-        this.pendingNotifications.delete(sessionId);
-        this.updateNotificationDisplay();
-        return;
-      }
+    if (this.pendingNotifications.delete(id)) {
+      this.updateNotificationDisplay();
     }
   }
 
   dismissBySession(sessionId: string): void {
-    const notification = this.pendingNotifications.get(sessionId);
-    if (notification) {
-      // Cancel any pending timer
-      this.cancelPendingTimer(sessionId);
-
-      // If notification wasn't shown yet, it was auto-permitted - just remove silently
-      if (!notification.shown) {
-        console.log('[NotificationManager] Auto-permitted tool completed before display:', sessionId);
+    let changed = false;
+    for (const [key, notification] of this.pendingNotifications) {
+      if (notification.sessionId === sessionId) {
+        this.pendingNotifications.delete(key);
+        changed = true;
       }
-
-      this.pendingNotifications.delete(sessionId);
+    }
+    if (changed) {
       this.updateNotificationDisplay();
     }
   }
@@ -304,7 +278,7 @@ export class NotificationManager {
   dismissByToolAndSummary(tool: string, summary: string, projectPath?: string): void {
     // Find and dismiss notification matching tool + projectPath + summary
     // Uses prefix matching for summary to handle truncation differences
-    for (const [sessionId, notification] of this.pendingNotifications) {
+    for (const [key, notification] of this.pendingNotifications) {
       // Must match tool
       if (notification.tool !== tool) continue;
 
@@ -318,22 +292,13 @@ export class NotificationManager {
         summary.startsWith(notification.summary);
 
       if (summaryMatches) {
-        console.log('[NotificationManager] Dismissing notification by tool+project+summary match:', { tool, projectPath, summary, sessionId });
-        this.cancelPendingTimer(sessionId);
-        this.pendingNotifications.delete(sessionId);
+        console.log('[NotificationManager] Dismissing notification by tool+project+summary match:', { tool, projectPath, summary, id: key });
+        this.pendingNotifications.delete(key);
         this.updateNotificationDisplay();
         return;
       }
     }
     console.log('[NotificationManager] No matching notification found for:', { tool, projectPath, summary });
-  }
-
-  private cancelPendingTimer(sessionId: string): void {
-    const timerId = this.pendingTimers.get(sessionId);
-    if (timerId) {
-      window.clearTimeout(timerId);
-      this.pendingTimers.delete(sessionId);
-    }
   }
 
   dismissByType(type: 'plan' | 'question' | 'attention'): void {
@@ -347,10 +312,9 @@ export class NotificationManager {
 
     // For plan/approval, also clear pending notifications
     if (type === 'plan') {
-      for (const [sessionId, notification] of this.pendingNotifications.entries()) {
+      for (const [key, notification] of this.pendingNotifications.entries()) {
         if (notification.tool === 'Plan') {
-          this.cancelPendingTimer(sessionId);
-          this.pendingNotifications.delete(sessionId);
+          this.pendingNotifications.delete(key);
         }
       }
       this.updateNotificationDisplay();
@@ -358,11 +322,6 @@ export class NotificationManager {
   }
 
   dismissAll(): void {
-    // Cancel all timers
-    for (const timerId of this.pendingTimers.values()) {
-      window.clearTimeout(timerId);
-    }
-    this.pendingTimers.clear();
     this.pendingNotifications.clear();
     this.updateNotificationDisplay();
   }
@@ -372,7 +331,10 @@ export class NotificationManager {
   }
 
   hasPendingApproval(sessionId: string): boolean {
-    return this.pendingNotifications.has(sessionId);
+    for (const notification of this.pendingNotifications.values()) {
+      if (notification.sessionId === sessionId) return true;
+    }
+    return false;
   }
 
   hasAnyPendingApproval(): boolean {

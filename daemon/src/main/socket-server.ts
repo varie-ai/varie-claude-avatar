@@ -14,20 +14,16 @@ export interface ClaudeEvent {
 }
 
 type EventCallback = (event: ClaudeEvent) => void;
-type AllSessionsEndedCallback = () => void;
 
 export class SocketServer {
   private server: net.Server | null = null;
   private socketPath: string;
   private sessionTracker: SessionTracker;
   private onEvent: EventCallback;
-  private onAllSessionsEnded?: AllSessionsEndedCallback;
-  private allSessionsEndedTimeout?: NodeJS.Timeout;
 
-  constructor(sessionTracker: SessionTracker, onEvent: EventCallback, onAllSessionsEnded?: AllSessionsEndedCallback) {
+  constructor(sessionTracker: SessionTracker, onEvent: EventCallback) {
     this.sessionTracker = sessionTracker;
     this.onEvent = onEvent;
-    this.onAllSessionsEnded = onAllSessionsEnded;
 
     // Socket path - use /tmp on macOS/Linux
     this.socketPath = process.platform === 'win32'
@@ -100,28 +96,10 @@ export class SocketServer {
           if (event.sessionId) {
             this.sessionTracker.addSession(event.sessionId, event.metadata);
           }
-          // Cancel any pending auto-quit
-          if (this.allSessionsEndedTimeout) {
-            clearTimeout(this.allSessionsEndedTimeout);
-            this.allSessionsEndedTimeout = undefined;
-          }
           break;
         case 'session_end':
           if (event.sessionId) {
             this.sessionTracker.removeSession(event.sessionId);
-          }
-          // Check if all sessions ended
-          if (this.onAllSessionsEnded && this.sessionTracker.getActiveSessions().length === 0) {
-            // Clear any existing timeout
-            if (this.allSessionsEndedTimeout) {
-              clearTimeout(this.allSessionsEndedTimeout);
-            }
-            // Delay to allow for quick session restarts
-            this.allSessionsEndedTimeout = setTimeout(() => {
-              if (this.sessionTracker.getActiveSessions().length === 0) {
-                this.onAllSessionsEnded?.();
-              }
-            }, 5000); // 5s grace period
           }
           break;
         case 'approval_needed':

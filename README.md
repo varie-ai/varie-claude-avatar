@@ -4,7 +4,7 @@ An animated character companion for [Claude Code](https://claude.ai/code) that l
 
 Pick from a library of characters — or create your own on [Varie](https://varie.ai) — and launch it alongside Claude Code. The avatar shows expressions as tools run, keeps you on top of notifications across multiple sessions, and tracks your usage stats at a glance.
 
-**Privacy:** No external network connections except downloading character data from Varie.AI. All session stats, notifications, and state stay local on your machine.
+**Privacy:** No external network connections except downloading character data from Varie. All session stats, notifications, and state stay local on your machine.
 
 ## How It Works
 

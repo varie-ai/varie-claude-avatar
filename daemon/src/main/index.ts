@@ -374,12 +374,6 @@ function startServices(): void {
           pushStatsUpdate();
         }
       }
-    },
-    () => {
-      // onAllSessionsEnded callback - quit when all Claude sessions end
-      log('INFO', 'All Claude sessions ended, quitting...');
-      app.isQuitting = true;
-      app.quit();
     }
   );
   socketServer.start();
