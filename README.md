@@ -35,7 +35,7 @@ Pick from a library of characters — or [create your own](https://varie.ai) —
 /plugin marketplace add https://github.com/varie-ai/varie-claude-avatar
 
 # 2. Install plugin
-/plugin install varie-avatar@varie-avatar-local
+/plugin install varie-avatar@varie-avatar
 
 # 3. Restart Claude Code — the avatar appears automatically
 ```
@@ -64,11 +64,11 @@ The desktop app will be updated separately from [Releases](https://github.com/va
 
 ### Gatekeeper Note (macOS)
 
-The desktop app is code-signed but not yet notarized. If macOS blocks it on first launch:
+If you encounter a "developer cannot be verified" prompt on first launch:
 - **macOS 14 and earlier:** Right-click the app → Open → click Open
 - **macOS 15 (Sequoia):** System Settings → Privacy & Security → scroll down → click "Open Anyway"
 
-This does **not** apply to the automatic install — `curl` downloads bypass Gatekeeper.
+This typically only affects manual `.dmg` installs — the automatic install via `curl` bypasses Gatekeeper.
 
 ## Features
 
