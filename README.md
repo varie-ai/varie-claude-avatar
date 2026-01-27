@@ -1,70 +1,111 @@
 # Varie Claude Avatar
 
+<!-- Screenshots: replace with actual images/GIFs -->
+<!-- <img width="300" alt="avatar-demo" src="https://github.com/user-attachments/assets/PLACEHOLDER" /> -->
+<!-- <img width="300" alt="notification-demo" src="https://github.com/user-attachments/assets/PLACEHOLDER" /> -->
+
 An animated character companion for [Claude Code](https://claude.ai/code) that lives as a desktop overlay, reacting to your coding sessions with expressions and notifications.
 
-Pick from a library of characters — or create your own on [Varie](https://varie.ai) — and launch it alongside Claude Code. The avatar shows expressions as tools run, keeps you on top of notifications across multiple sessions, and tracks your usage stats at a glance.
+Pick from a library of characters — or [create your own](https://varie.ai) — and launch it alongside Claude Code. The avatar shows expressions as tools run, keeps you on top of notifications across multiple sessions, and tracks your usage stats at a glance.
 
-**Privacy:** No external network connections except downloading character data from Varie. All session stats, notifications, and state stay local on your machine.
+## Table of Contents
 
-## How It Works
+- [Installation](#installation)
+- [Features](#features)
+- [Notifications](#notifications)
+- [Characters](#characters)
+- [Stats Panel](#stats-panel)
+- [Platform Support](#platform-support)
+- [Development](#development)
+- [Architecture](#architecture)
+- [License](#license)
 
-Two components work together:
+## Installation
 
-- **Plugin** — Claude Code hooks that send events (tool use, session start/end, approvals) to the daemon
-- **Daemon** — Electron desktop overlay that renders an animated [Spine](http://esotericsoftware.com/) character and shows notifications
+### Install the Plugin
 
-## Install
-
-### Step 1: Install the Plugin
-
-In any Claude Code session:
-
-```
-/plugin install varie-avatar
-```
-
-Or add the marketplace and install:
-
-```
+```bash
+# 1. Add marketplace
 /plugin marketplace add https://github.com/varie-ai/varie-claude-avatar
+
+# 2. Install plugin
 /plugin install varie-avatar@varie-avatar-local
+
+# 3. Restart Claude Code — the avatar appears automatically
 ```
 
-### Step 2: Start Coding — the Daemon Installs Automatically
+**That's it!** The desktop app downloads automatically in the background on your first session and launches from the next session onward.
 
-On your first session, the plugin detects the daemon isn't installed and **downloads it automatically** in the background. You'll see:
+### Alternative Install Methods
 
-```
-[varie-avatar] Daemon not found. Downloading in background — it'll be ready next session.
-```
-
-The avatar will appear starting from your next session.
-
-**Or install it manually:**
+**Interactive install** (if auto-download didn't run):
 
 ```
 /varie-avatar:install
 ```
 
-**Or download directly:**
+**Manual download:**
 
 Download the latest `.dmg` from [Releases](https://github.com/varie-ai/varie-claude-avatar/releases), open it, and drag to Applications.
 
-That's it. The avatar launches automatically on every Claude Code session after the daemon is installed.
+### Updating
 
-## What It Reacts To
+1. Run `/plugin`, select your marketplace, then **Update marketplace**
+2. Select **Installed**, choose `varie-avatar`, then **Update now**
+3. Restart Claude Code for hook changes to take effect
 
-| Event | Avatar Response |
-|-------|----------------|
-| Tool needs approval | Shows notification badge, approval expression |
+The desktop app will be updated separately from [Releases](https://github.com/varie-ai/varie-claude-avatar/releases) (auto-update coming soon).
+
+### Gatekeeper Note (macOS)
+
+The desktop app is currently unsigned. If you install manually via browser download, macOS may block it on first launch:
+- **macOS 14 and earlier:** Right-click the app → Open → click Open
+- **macOS 15 (Sequoia):** System Settings → Privacy & Security → scroll down → click "Open Anyway"
+
+This does **not** apply to the automatic install — `curl` downloads bypass Gatekeeper.
+
+## Features
+
+### 🎭 Animated Character Overlay
+- Spine-animated character sits on your desktop as a transparent overlay
+- Reacts to Claude Code events with expressions and animations
+- Tracks your cursor for eye-gaze follow
+- Drag to reposition, resize (S/M/L), or minimize
+
+### 🔔 Cross-Session Notifications
+- See approval requests, questions, and attention alerts across all your Claude Code sessions
+- Notification badges with project name, tool info, and command summaries
+- Click to dismiss — keeps your workspace uncluttered
+
+### 🎨 Character Library
+- Browse and switch characters from the [Varie](https://varie.ai) character library
+- Create your own characters at [varie.ai/varie-mate](https://varie.ai/varie-mate)
+- Characters are cached locally after first download
+
+### 📊 Usage Stats
+- Session count, daily/weekly totals, top projects
+- Hover top-left corner to reveal, pin to keep visible
+- Data stored locally with 7-day rolling window
+
+### 🔒 Privacy
+- **No telemetry, no analytics, no tracking**
+- No external network connections except downloading character data from Varie
+- All session stats, notifications, and state stay local on your machine
+- Communication between plugin and daemon via local Unix socket
+
+## Notifications
+
+| Event | Response |
+|-------|----------|
+| Tool needs approval | Notification badge with tool name + command summary |
 | Tool completes | Success expression |
-| Claude asks a question | Question expression + notification |
+| Claude asks a question | Question notification + expression |
 | Plan ready for review | Notification badge |
-| Claude needs attention | Pulsing notification |
+| Claude needs attention | Pulsing attention notification |
 
-## Changing Characters
+## Characters
 
-Use the plugin skills to browse and switch characters:
+Browse and switch characters using plugin skills:
 
 ```
 /varie-avatar:list          # Browse available characters
@@ -72,33 +113,30 @@ Use the plugin skills to browse and switch characters:
 /varie-avatar:status        # Check current character and daemon status
 ```
 
-Characters are loaded from the [Varie](https://varie.ai) character library.
+Characters are loaded from the [Varie](https://varie.ai) character library. Create your own at [varie.ai/varie-mate](https://varie.ai/varie-mate).
 
 ## Stats Panel
 
-Hover over the top-left corner of the overlay to see:
+Hover over the top-left corner of the overlay to reveal:
 - Active session count (green dot)
 - Today's and this week's session totals
 - Your most-used projects
 
-Pin the panel with the pin button to keep it visible.
+Click the pin button to keep the panel visible. Click reload to reset the active session count.
 
-## Project Structure
+## Platform Support
 
-```
-varie-claude-avatar/
-├── daemon/              # Electron desktop overlay app
-│   ├── src/main/        # Main process (window, socket server, tracking)
-│   ├── src/renderer/    # Renderer (Spine character, notifications, UI)
-│   ├── assets/          # App icons
-│   └── package.json
-├── plugin/              # Claude Code plugin
-│   ├── .claude-plugin/  # Plugin manifest
-│   ├── hooks/           # Event hooks (SessionStart, PreToolUse, etc.)
-│   ├── scripts/         # Daemon launcher + event notification scripts
-│   └── skills/          # /varie-avatar:list, :set, :status
-└── scripts/             # Build and deploy helpers
-```
+| Platform | Status | Install Path |
+|----------|--------|-------------|
+| macOS (Apple Silicon) | Supported | `~/Applications/` or `/Applications/` |
+| macOS (Intel) | Coming soon | — |
+| Windows | Planned | `%LOCALAPPDATA%/Programs/` |
+| Linux | Planned | `~/.local/bin/` |
+
+**Requirements:**
+- macOS 10.15+ (Catalina or later)
+- Claude Code with plugin support
+- Node.js 18+ (for building from source only)
 
 ## Development
 
@@ -114,23 +152,78 @@ npm run watch   # Watch mode (rebuild on file change)
 ### Testing Notifications
 
 ```bash
-# Send a test notification via Unix socket
-echo '{"type":"notification","tool":"","sessionId":"test","timestamp":'$(date +%s)000',"metadata":{"project":"test","projectPath":"/test","summary":""}}' | nc -w1 -U /tmp/varie-claude-avatar.sock
+# Send a test attention notification
+echo '{"type":"attention","tool":"","sessionId":"test","timestamp":'$(date +%s)000',"metadata":{"project":"test","projectPath":"/test","summary":"Testing"}}' \
+  | nc -w1 -U /tmp/varie-claude-avatar.sock
+
+# Send a test approval notification
+echo '{"type":"approval_needed","tool":"Bash","sessionId":"test","timestamp":'$(date +%s)000',"metadata":{"project":"test","projectPath":"/test","summary":"npm install"}}' \
+  | nc -w1 -U /tmp/varie-claude-avatar.sock
 ```
 
 ### Packaging
 
 ```bash
-npm run package:mac   # macOS .app + .dmg
+npm run package:mac   # macOS .app + .dmg + .zip
 npm run package:win   # Windows .exe (NSIS + portable)
 ```
 
-## Requirements
+### Deploy Locally
 
-- **macOS** 10.15+ (Catalina or later)
-- **Claude Code** with plugin support
-- **Node.js** 18+ (for building from source)
+```bash
+# Build, package, kill old process, install to /Applications, and launch
+scripts/deploy-local.sh
+
+# Skip build (just kill + replace + launch)
+scripts/deploy-local.sh --skip-build
+```
+
+## Architecture
+
+```
+plugin/                          daemon/
+┌─────────────────────┐          ┌──────────────────────────────┐
+│  SessionStart hook   │──────▶  │  ensure-daemon-running       │
+│  PreToolUse hook     │──┐      │  (auto-launch / auto-install)│
+│  PostToolUse hook    │  │      └──────────────────────────────┘
+│  Stop hook           │  │                    │
+│  Notification hook   │  │      ┌─────────────▼────────────────┐
+└─────────────────────┘  │      │  Socket Server                │
+                         │      │  /tmp/varie-claude-avatar.sock│
+  varie-avatar-notify    │      └─────────────┬────────────────┘
+  (sends JSON events) ◀──┘                    │
+         │                       ┌─────────────▼────────────────┐
+         └──────────────────────▶│  Electron Main Process       │
+                                 │  ├── SessionTracker          │
+                                 │  ├── StatsTracker            │
+                                 │  └── MouseTracker            │
+                                 └─────────────┬────────────────┘
+                                               │
+                                 ┌─────────────▼────────────────┐
+                                 │  Renderer                    │
+                                 │  ├── Spine Character (WebGL) │
+                                 │  ├── Notification Manager    │
+                                 │  └── Stats Panel             │
+                                 └──────────────────────────────┘
+```
+
+### Project Structure
+
+```
+varie-claude-avatar/
+├── daemon/                 # Electron desktop overlay app
+│   ├── src/main/           # Main process (window, socket, tracking)
+│   ├── src/renderer/       # Renderer (Spine character, notifications, UI)
+│   ├── assets/             # App icons
+│   └── package.json
+├── plugin/                 # Claude Code plugin
+│   ├── .claude-plugin/     # Plugin manifest
+│   ├── hooks/              # Event hooks (hooks.json)
+│   ├── scripts/            # ensure-daemon-running, install-daemon, varie-avatar-notify
+│   └── skills/             # /varie-avatar:list, :set, :status, :install
+└── scripts/                # Build and deploy helpers
+```
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
