@@ -112,12 +112,20 @@ const CONFIG_DIR = path.join(os.homedir(), '.varie-claude-avatar');
 const CHARACTERS_DIR = path.join(CONFIG_DIR, 'characters');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 const DEFAULT_CHARACTER_ID = 'vespera_b02d095ae396';
-const CDN_BASE = 'https://varie.ai/models/custom';
+// Legacy fallback — only used when config.json has no modelUrls (e.g. cold start with default character).
+// New character-set operations save backend-provided URLs to config.json directly.
+const CDN_BASE_FALLBACK = 'https://varie.ai/models/custom';
+
+interface ModelUrls {
+  fullUrl: string | null;
+  baseUrl: string | null;
+}
 
 interface CharacterConfig {
   activeCharacter: string;
   characterName?: string;
   publicModelStatus?: string;
+  modelUrls?: ModelUrls;
   scale?: number;
 }
 
@@ -160,52 +168,66 @@ function getScaledSize(): { width: number; height: number } {
   };
 }
 
-/**
- * Determine bundle fetch order based on publicModelStatus.
- * - "full_ready" → try full first, fall back to base
- * - "base_ready" → only try base (full doesn't exist)
- * - unknown/null → try full first, fall back to base
- */
-function getBundleOrder(modelStatus?: string): string[] {
-  if (modelStatus === 'base_ready') {
-    return ['base_avatar.varie'];
-  }
-  // full_ready or unknown: try full first, then base as fallback
-  return ['full_avatar.varie', 'base_avatar.varie'];
+interface BundleTarget {
+  url: string;
+  cacheName: string;
 }
 
-async function loadCharacterBundle(characterId: string, modelStatus?: string): Promise<Buffer> {
-  const cacheDir = path.join(CHARACTERS_DIR, characterId);
+/**
+ * Build ordered list of bundle URLs to try.
+ * Prefers backend-provided URLs from config; falls back to legacy CDN construction.
+ */
+function getBundleTargets(characterId: string, config: CharacterConfig): BundleTarget[] {
+  const modelUrls = config.activeCharacter === characterId ? config.modelUrls : undefined;
 
-  // If modelStatus not provided, read from config (covers init / cold start)
-  if (!modelStatus) {
-    const config = readCharacterConfig();
-    if (config.activeCharacter === characterId) {
-      modelStatus = config.publicModelStatus;
+  // If backend-provided URLs exist, use them
+  if (modelUrls && (modelUrls.fullUrl || modelUrls.baseUrl)) {
+    const targets: BundleTarget[] = [];
+    if (modelUrls.fullUrl) {
+      targets.push({ url: modelUrls.fullUrl, cacheName: 'full_avatar.varie' });
     }
+    if (modelUrls.baseUrl) {
+      targets.push({ url: modelUrls.baseUrl, cacheName: 'base_avatar.varie' });
+    }
+    return targets;
   }
 
-  const bundleNames = getBundleOrder(modelStatus);
-  log('INFO', `Loading character ${characterId} (status: ${modelStatus || 'unknown'}, order: ${bundleNames.join(', ')})`);
+  // Legacy fallback: construct URLs from character ID (pre-ISSUE-006 configs / default character)
+  log('WARN', `No modelUrls in config for ${characterId}, using legacy CDN fallback`);
+  const modelStatus = config.activeCharacter === characterId ? config.publicModelStatus : undefined;
+  if (modelStatus === 'base_ready') {
+    return [{ url: `${CDN_BASE_FALLBACK}/${characterId}/model/public/base_avatar.varie`, cacheName: 'base_avatar.varie' }];
+  }
+  return [
+    { url: `${CDN_BASE_FALLBACK}/${characterId}/model/public/full_avatar.varie`, cacheName: 'full_avatar.varie' },
+    { url: `${CDN_BASE_FALLBACK}/${characterId}/model/public/base_avatar.varie`, cacheName: 'base_avatar.varie' },
+  ];
+}
+
+async function loadCharacterBundle(characterId: string): Promise<Buffer> {
+  const cacheDir = path.join(CHARACTERS_DIR, characterId);
+  const config = readCharacterConfig();
+  const targets = getBundleTargets(characterId, config);
+
+  log('INFO', `Loading character ${characterId} (targets: ${targets.map(t => t.cacheName).join(', ')})`);
 
   // Check local cache first
-  for (const name of bundleNames) {
-    const cachePath = path.join(cacheDir, name);
+  for (const target of targets) {
+    const cachePath = path.join(cacheDir, target.cacheName);
     if (fs.existsSync(cachePath)) {
-      log('INFO', `Loading character ${characterId} from cache (${name})`);
+      log('INFO', `Loading character ${characterId} from cache (${target.cacheName})`);
       return fs.readFileSync(cachePath);
     }
   }
 
-  // Fetch from CDN
-  for (const name of bundleNames) {
-    const cdnUrl = `${CDN_BASE}/${characterId}/model/public/${name}`;
-    log('INFO', `Fetching character ${characterId} from CDN: ${cdnUrl}`);
+  // Fetch from URL
+  for (const target of targets) {
+    log('INFO', `Fetching character ${characterId}: ${target.url}`);
 
     try {
-      const response = await fetch(cdnUrl);
+      const response = await fetch(target.url);
       if (!response.ok) {
-        log('WARN', `CDN fetch for ${name} failed: ${response.status}`);
+        log('WARN', `Fetch for ${target.cacheName} failed: ${response.status}`);
         continue;
       }
 
@@ -214,12 +236,12 @@ async function loadCharacterBundle(characterId: string, modelStatus?: string): P
 
       // Cache locally
       fs.mkdirSync(cacheDir, { recursive: true });
-      fs.writeFileSync(path.join(cacheDir, name), buffer);
-      log('INFO', `Cached character ${characterId}/${name} (${buffer.length} bytes)`);
+      fs.writeFileSync(path.join(cacheDir, target.cacheName), buffer);
+      log('INFO', `Cached character ${characterId}/${target.cacheName} (${buffer.length} bytes)`);
 
       return buffer;
     } catch (err) {
-      log('WARN', `CDN fetch for ${name} error:`, err);
+      log('WARN', `Fetch for ${target.cacheName} error:`, err);
       continue;
     }
   }

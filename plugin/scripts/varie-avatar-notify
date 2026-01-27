@@ -54,14 +54,22 @@ if [[ -n "$STDIN_DATA" ]]; then
   # Extract permission_mode - will be "plan" when in plan mode
   PERMISSION_MODE=$(echo "$STDIN_DATA" | grep -o '"permission_mode"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"permission_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 
-  # Extract command/file info for summary
-  # For Bash: get the command (up to 150 chars for 2-line display)
+  # Extract command/file info for summary using shared Python module
+  # (handles JSON escaping: quoted strings, newlines, backslashes)
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
   if [[ "$TOOL" == "Bash" ]]; then
-    SUMMARY=$(echo "$STDIN_DATA" | grep -o '"command"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | cut -c1-150)
+    SUMMARY=$(echo "$STDIN_DATA" | python3 "$SCRIPT_DIR/extract_summary.py" command 2>/dev/null)
+    # Fallback: basic grep if python3/module unavailable (loses quoted args)
+    if [[ -z "$SUMMARY" ]]; then
+      SUMMARY=$(echo "$STDIN_DATA" | grep -o '"command"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | cut -c1-150)
+    fi
   fi
-  # For Write/Edit: get the file path
+  # For Write/Edit: get the file path basename
   if [[ "$TOOL" == "Write" || "$TOOL" == "Edit" ]]; then
-    SUMMARY=$(echo "$STDIN_DATA" | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | xargs basename 2>/dev/null)
+    SUMMARY=$(echo "$STDIN_DATA" | python3 "$SCRIPT_DIR/extract_summary.py" file_path 2>/dev/null)
+    if [[ -z "$SUMMARY" ]]; then
+      SUMMARY=$(echo "$STDIN_DATA" | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | xargs basename 2>/dev/null)
+    fi
   fi
   # For ExitPlanMode: set summary
   if [[ "$TOOL" == "ExitPlanMode" ]]; then

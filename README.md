@@ -81,7 +81,7 @@ This does **not** apply to the automatic install — `curl` downloads bypass Gat
 - Click to dismiss — keeps your workspace uncluttered
 
 ### 🎨 Character Library
-- Browse and switch characters from the [Varie.AI](https://varie.ai) character library
+- Browse and switch characters from the [Varie](https://varie.ai) character library
 - Create your own characters at [varie.ai/varie-mate](https://varie.ai/varie-mate)
 - Characters are cached locally after first download
 
@@ -116,7 +116,7 @@ Browse and switch characters using plugin skills:
 /varie-avatar:status        # Check current character and daemon status
 ```
 
-Characters are loaded from the [Varie.AI](https://varie.ai) character library. Create your own at [varie.ai/varie-mate](https://varie.ai/varie-mate).
+Characters are loaded from the [Varie](https://varie.ai) character library. Create your own at [varie.ai/varie-mate](https://varie.ai/varie-mate).
 
 ## Stats Panel
 

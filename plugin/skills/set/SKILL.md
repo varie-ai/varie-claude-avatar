@@ -43,7 +43,7 @@ rm -f ~/.varie-claude-avatar/characters/<id>/full_avatar.varie
 rm -f ~/.varie-claude-avatar/characters/<id>/base_avatar.varie
 ```
 
-4. Write the active character config (include `publicModelStatus` from the API response's `publicModel.status`):
+4. Write the active character config. Include `publicModelStatus` and the full model URLs from the API response's `publicModel` object (`fullUrl` and `baseUrl`). The daemon uses these URLs directly instead of constructing them:
 
 ```bash
 mkdir -p ~/.varie-claude-avatar
@@ -52,15 +52,21 @@ cat > ~/.varie-claude-avatar/config.json << 'CONFIGEOF'
   "activeCharacter": "<id>",
   "characterName": "<name>",
   "publicModelStatus": "<full_ready or base_ready>",
+  "modelUrls": {
+    "fullUrl": "<publicModel.fullUrl from API response, or null>",
+    "baseUrl": "<publicModel.baseUrl from API response, or null>"
+  },
   "updatedAt": "<ISO 8601 timestamp>"
 }
 CONFIGEOF
 ```
 
-5. Send `reload_character` event to the daemon socket (include `publicModelStatus` so the daemon knows which bundle to fetch):
+**Important:** Use the exact URL strings from the API response's `publicModel.fullUrl` and `publicModel.baseUrl`. If a URL is `null` in the response, write `null` (not the string `"null"`).
+
+5. Send `reload_character` event to the daemon socket:
 
 ```bash
-echo '{"type":"reload_character","sessionId":"'${CLAUDE_SESSION_ID:-plugin}'","timestamp":'$(date +%s)000',"metadata":{"characterId":"<id>","publicModelStatus":"<full_ready or base_ready>"}}' | nc -w1 -U /tmp/varie-claude-avatar.sock
+echo '{"type":"reload_character","sessionId":"'${CLAUDE_SESSION_ID:-plugin}'","timestamp":'$(date +%s)000',"metadata":{"characterId":"<id>"}}' | nc -w1 -U /tmp/varie-claude-avatar.sock
 ```
 
 6. Tell the user. Pick a **random quote** from the character's `quotes` array (if available) to give personality:
