@@ -47,7 +47,14 @@ trap 'rm -f "$LOCK_FILE"' EXIT
 if [[ "$OSTYPE" == "darwin"* ]]; then
   INSTALL_DIR="$HOME/Applications"
   APP_NAME="Varie Claude Avatar.app"
-  ASSET_PATTERN="arm64-mac.zip"
+  ARCH=$(uname -m)
+  if [[ "$ARCH" == "arm64" ]]; then
+    ASSET_PATTERN="arm64-mac.zip"
+  else
+    # x86_64 (Intel) — match mac.zip, exclude arm64 variant
+    ASSET_PATTERN="mac.zip"
+    ASSET_EXCLUDE="arm64"
+  fi
 
   # Check if already installed
   if [[ -d "/Applications/$APP_NAME" ]] || [[ -d "$INSTALL_DIR/$APP_NAME" ]]; then
@@ -87,7 +94,11 @@ if [[ -z "$RELEASE_JSON" ]]; then
   exit 1
 fi
 
-ASSET_URL=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | grep "$ASSET_PATTERN" | head -1 | grep -o 'https://[^"]*')
+ASSET_URLS=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | grep "$ASSET_PATTERN")
+if [[ -n "${ASSET_EXCLUDE:-}" ]]; then
+  ASSET_URLS=$(echo "$ASSET_URLS" | grep -v "$ASSET_EXCLUDE")
+fi
+ASSET_URL=$(echo "$ASSET_URLS" | head -1 | grep -o 'https://[^"]*')
 
 if [[ -z "$ASSET_URL" ]]; then
   log "[varie-avatar] No matching release asset found for this platform"
