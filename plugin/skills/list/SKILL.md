@@ -76,7 +76,7 @@ Explain briefly why each matches (e.g., "Soren's calm and wise personality fits 
 [Profile](https://varie.ai/varie-mate/characters/{id}) · `/varie-avatar:set {id}`
 ```
 
-Highlight **Vespera** (`vespera_b02d095ae396`) and **Soren** (`soren_cb3333dd3e3f`) as recommended starters if present.
+Highlight **Beatriz** (`beatriz_4e17b3271c2b`) and **Soren** (`soren_cb3333dd3e3f`) as recommended starters if present.
 
 ### Step 4: Activate
 

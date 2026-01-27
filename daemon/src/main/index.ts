@@ -111,7 +111,7 @@ const NOTIFICATION_HEADER_HEIGHT = 108; // Space reserved for notifications abov
 const CONFIG_DIR = path.join(os.homedir(), '.varie-claude-avatar');
 const CHARACTERS_DIR = path.join(CONFIG_DIR, 'characters');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
-const DEFAULT_CHARACTER_ID = 'vespera_b02d095ae396';
+const DEFAULT_CHARACTER_ID = 'beatriz_4e17b3271c2b';
 // Legacy fallback — only used when config.json has no modelUrls (e.g. cold start with default character).
 // New character-set operations save backend-provided URLs to config.json directly.
 const CDN_BASE_FALLBACK = 'https://varie.ai/models/custom';

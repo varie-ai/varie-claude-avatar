@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "varie-avatar",
+  "description": "Animated character companion for Claude Code",
+  "owner": {
+    "name": "Varie.AI",
+    "email": "dev@varie.ai"
+  },
+  "plugins": [
+    {
+      "name": "varie-avatar",
+      "description": "Animated character companion that reacts to Claude Code events with expressions and notifications",
+      "version": "1.0.0",
+      "author": {
+        "name": "Varie.AI",
+        "email": "dev@varie.ai"
+      },
+      "source": "./plugin",
+      "category": "productivity"
+    }
+  ]
+}

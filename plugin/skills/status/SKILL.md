@@ -22,7 +22,7 @@ cat ~/.varie-claude-avatar/daemon.json 2>/dev/null
 cat ~/.varie-claude-avatar/config.json 2>/dev/null
 ```
 
-If the file doesn't exist, the default character (Vespera) is active.
+If the file doesn't exist, the default character (Beatriz) is active.
 
 ### 3. Cached Characters
 
@@ -44,9 +44,9 @@ Present as:
 ## Varie Claude Avatar Status
 
 **Daemon**: Running (PID 12345) / Not Running
-**Active Character**: Soren (`soren_cb3333dd3e3f`) / Vespera (default)
+**Active Character**: Soren (`soren_cb3333dd3e3f`) / Beatriz (default)
 **Profile**: https://varie.ai/varie-mate/characters/{activeCharacterId}
-**Cached Characters**: soren_cb3333dd3e3f, vespera_b02d095ae396
+**Cached Characters**: soren_cb3333dd3e3f, beatriz_4e17b3271c2b
 **Active Sessions**: 2
 
 ### Quick Actions

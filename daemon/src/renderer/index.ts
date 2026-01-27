@@ -21,7 +21,7 @@ class App {
   private character: SpineCharacter | null = null;
   private notifications: NotificationManager;
   private characterContainer: HTMLElement;
-  private activeCharacterId: string = 'vespera_b02d095ae396';
+  private activeCharacterId: string = 'beatriz_4e17b3271c2b';
   private currentScale: number = 1.0;
   private spreadModeEnabled = true;
   private spreadExpressionActive = false;
@@ -158,12 +158,12 @@ class App {
 
     // Load active character (from config or default)
     try {
-      const characterId = api ? await api.getActiveCharacterId() : 'vespera_b02d095ae396';
+      const characterId = api ? await api.getActiveCharacterId() : 'beatriz_4e17b3271c2b';
       console.log('[App] Active character:', characterId);
       await this.loadCharacterById(characterId);
     } catch (err) {
       console.error('[App] Failed to get active character, loading default:', err);
-      await this.loadCharacterById('vespera_b02d095ae396');
+      await this.loadCharacterById('beatriz_4e17b3271c2b');
     }
 
     console.log('[App] Initialization complete');
