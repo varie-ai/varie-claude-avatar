@@ -130,7 +130,9 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
   # Verify
   if [[ -d "$INSTALL_DIR/$APP_NAME" ]]; then
     log "[varie-avatar] Installed successfully: $INSTALL_DIR/$APP_NAME"
-    log "[varie-avatar] The avatar will launch automatically on your next Claude Code session."
+    # Launch immediately so the avatar appears this session
+    open -g -j "$INSTALL_DIR/$APP_NAME" &
+    log "[varie-avatar] Daemon launched."
   else
     log "[varie-avatar] Installation failed — app not found after extraction"
     exit 1

@@ -44,7 +44,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
       nohup "$DEV_ELECTRON" "$DEV_APP" >/dev/null 2>&1 &
     else
       # Not installed — auto-download in background
-      echo "[varie-avatar] Daemon not found. Downloading in background — it'll be ready next session."
+      echo "[varie-avatar] Daemon not found. Downloading in background — it'll appear shortly."
       echo "[varie-avatar] Or download manually: https://github.com/varie-ai/varie-claude-avatar/releases"
       nohup "$INSTALL_SCRIPT" >/dev/null 2>&1 &
       exit 0
@@ -63,7 +63,7 @@ elif [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || "$OSTYPE" == "win32"* 
     if [[ -f "$DEV_ELECTRON" ]]; then
       "$DEV_ELECTRON" "$DEV_APP" &
     else
-      echo "[varie-avatar] Daemon not found. Downloading in background — it'll be ready next session."
+      echo "[varie-avatar] Daemon not found. Downloading in background — it'll appear shortly."
       echo "[varie-avatar] Or download manually: https://github.com/varie-ai/varie-claude-avatar/releases"
       nohup "$INSTALL_SCRIPT" >/dev/null 2>&1 &
       exit 0
@@ -88,7 +88,7 @@ elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     if [[ -f "$DEV_ELECTRON" ]]; then
       nohup "$DEV_ELECTRON" "$DEV_APP" >/dev/null 2>&1 &
     else
-      echo "[varie-avatar] Daemon not found. Downloading in background — it'll be ready next session."
+      echo "[varie-avatar] Daemon not found. Downloading in background — it'll appear shortly."
       echo "[varie-avatar] Or download manually: https://github.com/varie-ai/varie-claude-avatar/releases"
       nohup "$INSTALL_SCRIPT" >/dev/null 2>&1 &
       exit 0
