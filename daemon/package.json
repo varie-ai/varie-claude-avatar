@@ -1,6 +1,6 @@
 {
   "name": "varie-claude-avatar",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Desktop overlay companion with animated Varie characters for Claude Code users",
   "repository": "github:varie-ai/varie-claude-avatar",
   "main": "dist/main/index.js",
