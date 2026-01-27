@@ -1,10 +1,13 @@
 # Varie Claude Avatar
 
-<!-- Screenshots: replace with actual images/GIFs -->
-<!-- <img width="300" alt="avatar-demo" src="https://github.com/user-attachments/assets/PLACEHOLDER" /> -->
-<!-- <img width="300" alt="notification-demo" src="https://github.com/user-attachments/assets/PLACEHOLDER" /> -->
+<img src="screenshots/demo.gif" width="600" alt="Varie Claude Avatar demo — animated character reacting to Claude Code" />
 
 An animated character companion for [Claude Code](https://claude.ai/code) that lives as a desktop overlay, reacting to your coding sessions with expressions and notifications.
+
+<p>
+  <img src="screenshots/notification.png" width="250" alt="Approval notification with character" />
+  <img src="screenshots/stats.png" width="250" alt="Stats panel showing session counts" />
+</p>
 
 Pick from a library of characters — or [create your own](https://varie.ai) — and launch it alongside Claude Code. The avatar shows expressions as tools run, keeps you on top of notifications across multiple sessions, and tracks your usage stats at a glance.
 
