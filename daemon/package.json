@@ -20,7 +20,6 @@
   "author": "Varie",
   "license": "MIT",
   "devDependencies": {
-    "@electron/notarize": "^3.1.1",
     "@types/node": "^20.10.0",
     "concurrently": "^8.2.2",
     "electron": "^28.0.0",
@@ -31,7 +30,6 @@
   "build": {
     "appId": "ai.varie.claude-avatar",
     "productName": "Varie Claude Avatar",
-    "afterSign": "scripts/notarize.js",
     "directories": {
       "output": "release"
     },
