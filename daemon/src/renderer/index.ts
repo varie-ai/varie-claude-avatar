@@ -244,8 +244,13 @@ class App {
         break;
 
       case 'user_prompt':
-        // User submitted a prompt - dismiss any attention notifications
+        // User submitted a prompt - dismiss attention notifications and
+        // any pending approval notifications for this session (covers tool rejection:
+        // if user rejected a tool, the next prompt means they've moved on)
         this.notifications.dismissByType('attention');
+        if (event.sessionId) {
+          this.notifications.dismissBySession(event.sessionId);
+        }
         // Show "thinking" expression
         this.character?.setExpression('curious');
         // Clear after a short time (Claude will send other events as it works)

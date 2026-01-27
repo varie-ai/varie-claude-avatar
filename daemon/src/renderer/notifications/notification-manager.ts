@@ -23,6 +23,8 @@ interface PendingNotification {
   timestamp: number;
 }
 
+const MIN_DISPLAY_MS = 1000; // Minimum time a notification stays visible before auto-dismissal
+
 export class NotificationManager {
   private container: HTMLElement;
   private appElement: HTMLElement; // For approval notifications (needs viewport-relative fixed positioning)
@@ -292,9 +294,23 @@ export class NotificationManager {
         summary.startsWith(notification.summary);
 
       if (summaryMatches) {
-        console.log('[NotificationManager] Dismissing notification by tool+project+summary match:', { tool, projectPath, summary, id: key });
-        this.pendingNotifications.delete(key);
-        this.updateNotificationDisplay();
+        // Enforce minimum display duration so quick auto-approved tools
+        // still flash the notification visibly (1s) before dismissing
+        const elapsed = Date.now() - notification.timestamp;
+        if (elapsed < MIN_DISPLAY_MS) {
+          const remaining = MIN_DISPLAY_MS - elapsed;
+          console.log('[NotificationManager] Delaying dismiss by', remaining, 'ms for min display:', key);
+          setTimeout(() => {
+            if (this.pendingNotifications.has(key)) {
+              this.pendingNotifications.delete(key);
+              this.updateNotificationDisplay();
+            }
+          }, remaining);
+        } else {
+          console.log('[NotificationManager] Dismissing notification by tool+project+summary match:', { tool, projectPath, summary, id: key });
+          this.pendingNotifications.delete(key);
+          this.updateNotificationDisplay();
+        }
         return;
       }
     }

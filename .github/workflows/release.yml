@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [arm64, x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: daemon/package-lock.json
+
+      - name: Install dependencies
+        working-directory: daemon
+        run: npm ci
+
+      - name: Build
+        working-directory: daemon
+        run: npm run build
+
+      - name: Package for macOS (${{ matrix.arch }})
+        working-directory: daemon
+        run: npx electron-builder --mac --${{ matrix.arch }}
+        env:
+          # Code signing — set these as GitHub secrets when Apple Dev account is ready
+          # CSC_LINK: ${{ secrets.CSC_LINK }}
+          # CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.arch }}
+          path: |
+            daemon/release/*.dmg
+            daemon/release/*-mac.zip
+          if-no-files-found: error
+
+  release:
+    needs: build-mac
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.zip
+          body: |
+            ## Varie Claude Avatar ${{ github.ref_name }}
+
+            ### Install
+
+            1. Install the plugin in Claude Code:
+               ```
+               /plugin marketplace add https://github.com/varie-ai/varie-claude-avatar
+               /plugin install varie-avatar@varie-avatar-local
+               ```
+            2. The daemon downloads automatically on your first session. Or download manually below.
+
+            ### Downloads
+
+            - **macOS (Apple Silicon):** `*-arm64.dmg`
+            - **macOS (Intel):** `*-x64.dmg`
+
+            ### Note
+
+            This is an unsigned build. If you install manually via browser download, macOS may block it:
+            - **macOS 14 and earlier:** Right-click the app → Open → click Open
+            - **macOS 15 (Sequoia):** System Settings → Privacy & Security → "Open Anyway"
