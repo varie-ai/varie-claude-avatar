@@ -90,6 +90,18 @@ export class SocketServer {
 
       console.log('Received event:', event.type, event.sessionId);
 
+      // Auto-register unknown sessions (handles missed session_start,
+      // e.g. daemon launched mid-session after background install,
+      // or daemon restarted while sessions were active)
+      let autoRegistered = false;
+      if (event.sessionId && event.type !== 'session_end' && event.type !== 'session_start') {
+        if (!this.sessionTracker.getSession(event.sessionId)) {
+          console.log('Auto-registering unknown session:', event.sessionId);
+          this.sessionTracker.addSession(event.sessionId, event.metadata);
+          autoRegistered = true;
+        }
+      }
+
       // Update session tracker
       switch (event.type) {
         case 'session_start':
@@ -112,6 +124,17 @@ export class SocketServer {
             this.sessionTracker.clearPendingApproval(event.sessionId);
           }
           break;
+      }
+
+      // If session was auto-registered, emit synthetic session_start
+      // so stats tracker records it and UI updates active count
+      if (autoRegistered) {
+        this.onEvent({
+          type: 'session_start',
+          sessionId: event.sessionId,
+          timestamp: event.timestamp,
+          metadata: event.metadata,
+        });
       }
 
       // Notify renderer

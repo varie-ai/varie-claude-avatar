@@ -134,14 +134,19 @@ SUMMARY="${SUMMARY//$'\n'/\\n}"
 # Build JSON
 JSON="{\"type\":\"$EVENT\",\"tool\":\"$TOOL\",\"sessionId\":\"$SID\",\"timestamp\":$(date +%s)000,\"metadata\":{\"project\":\"$PROJECT\",\"projectPath\":\"$PROJECT_PATH\",\"summary\":\"$SUMMARY\"}}"
 
-# Write to socket in background subshell, completely detached
-# Retry up to 3 times with 0.5s delay — covers socket-not-ready race after daemon launch
-(
-  exec >/dev/null 2>&1
-  for _attempt in 1 2 3; do
-    echo "$JSON" | nc -w1 -U "$SOCKET" && break
-    sleep 0.5
-  done
-) </dev/null >/dev/null 2>&1 &
+# session_end must send synchronously — the process tree is torn down
+# immediately after, so a background subshell would be killed before delivery.
+# All other events use a detached background subshell with retry.
+if [[ "$EVENT" == "session_end" ]]; then
+  echo "$JSON" | nc -w1 -U "$SOCKET" >/dev/null 2>&1
+else
+  (
+    exec >/dev/null 2>&1
+    for _attempt in 1 2 3; do
+      echo "$JSON" | nc -w1 -U "$SOCKET" && break
+      sleep 0.5
+    done
+  ) </dev/null >/dev/null 2>&1 &
+fi
 
 exit 0
