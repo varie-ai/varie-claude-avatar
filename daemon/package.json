@@ -1,6 +1,6 @@
 {
   "name": "varie-claude-avatar",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Desktop overlay companion with animated Varie characters for Claude Code users",
   "repository": "github:varie-ai/varie-claude-avatar",
   "main": "dist/main/index.js",
@@ -20,6 +20,7 @@
   "author": "Varie",
   "license": "MIT",
   "devDependencies": {
+    "@electron/notarize": "^3.1.1",
     "@types/node": "^20.10.0",
     "concurrently": "^8.2.2",
     "electron": "^28.0.0",
@@ -27,22 +28,30 @@
     "esbuild": "^0.19.8",
     "typescript": "^5.3.0"
   },
-  "dependencies": {
-  },
   "build": {
     "appId": "ai.varie.claude-avatar",
     "productName": "Varie Claude Avatar",
+    "afterSign": "scripts/notarize.js",
     "directories": {
       "output": "release"
     },
     "mac": {
       "category": "public.app-category.utilities",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "icon": "assets/icon.icns",
-      "identity": null
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "assets/icon.icns"
     },
     "files": [

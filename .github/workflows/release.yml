@@ -36,12 +36,11 @@ jobs:
         working-directory: daemon
         run: npx electron-builder --mac --${{ matrix.arch }} --publish never
         env:
-          # Code signing — set these as GitHub secrets when Apple Dev account is ready
-          # CSC_LINK: ${{ secrets.CSC_LINK }}
-          # CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          # APPLE_ID: ${{ secrets.APPLE_ID }}
-          # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifacts
@@ -92,8 +91,4 @@ jobs:
             - **macOS (Apple Silicon):** `*-arm64.dmg`
             - **macOS (Intel):** `*-x64.dmg`
 
-            ### Note
-
-            This is an unsigned build. If you install manually via browser download, macOS may block it:
-            - **macOS 14 and earlier:** Right-click the app → Open → click Open
-            - **macOS 15 (Sequoia):** System Settings → Privacy & Security → "Open Anyway"
+            This build is signed and notarized by Apple.
