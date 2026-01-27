@@ -34,7 +34,7 @@ jobs:
 
       - name: Package for macOS (${{ matrix.arch }})
         working-directory: daemon
-        run: npx electron-builder --mac --${{ matrix.arch }}
+        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
         env:
           # Code signing — set these as GitHub secrets when Apple Dev account is ready
           # CSC_LINK: ${{ secrets.CSC_LINK }}
