@@ -1,6 +1,6 @@
 {
   "name": "varie-claude-avatar",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Desktop overlay companion with animated Varie characters for Claude Code users",
   "repository": "github:varie-ai/varie-claude-avatar",
   "main": "dist/main/index.js",
@@ -44,7 +44,7 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "notarize": false
+      "notarize": {"teamId": "DT49XDQPKV"}
     },
     "win": {
       "target": [
