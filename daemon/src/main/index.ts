@@ -594,6 +594,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  app.isQuitting = true;
   socketServer?.stop();
   mouseTracker?.stop();
 });
