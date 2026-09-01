@@ -1,4 +1,4 @@
-const { test, after, before } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const net = require('node:net');
 const esbuild = require('../../daemon/node_modules/esbuild');
@@ -44,45 +44,60 @@ async function connectWithRetry(endpoint, onConnect) {
     let timer;
     let timeoutTimer;
     let ended = false;
-    
-    timeoutTimer = setTimeout(() => {
-      if (!ended) {
-        ended = true;
-        clearTimeout(timer);
-        reject(new Error('connectWithRetry timed out'));
+    let activeClient = null;
+
+    const cleanup = () => {
+      ended = true;
+      clearTimeout(timer);
+      clearTimeout(timeoutTimer);
+      if (activeClient) {
+        activeClient.destroy();
+        activeClient = null;
       }
+    };
+
+    const safeReject = (err) => {
+      if (!ended) {
+        cleanup();
+        reject(err);
+      }
+    };
+
+    const safeResolve = (val) => {
+      if (!ended) {
+        cleanup();
+        resolve(val);
+      }
+    };
+
+    timeoutTimer = setTimeout(() => {
+      safeReject(new Error('connectWithRetry timed out'));
     }, 4500);
 
     const connect = () => {
-      const client = net.createConnection(endpoint);
-      client.on('error', (err) => {
-        client.destroy();
+      if (ended) return;
+      activeClient = net.createConnection(endpoint);
+      activeClient.on('error', (err) => {
+        if (activeClient) activeClient.destroy();
+        activeClient = null;
+        if (ended) return;
+
         if (err.code === 'ENOENT' && retries > 0) {
           retries--;
           timer = setTimeout(connect, 50);
         } else {
-          if (!ended) {
-            ended = true;
-            clearTimeout(timeoutTimer);
-            reject(err);
-          }
+          safeReject(err);
         }
       });
-      client.on('connect', () => {
+
+      activeClient.on('connect', () => {
+        if (ended) return;
         clearTimeout(timer);
-        onConnect(client, (res) => {
-          if (!ended) {
-            ended = true;
-            clearTimeout(timeoutTimer);
-            resolve(res);
-          }
-        }, (err) => {
-          if (!ended) {
-            ended = true;
-            clearTimeout(timeoutTimer);
-            reject(err);
-          }
-        });
+        try {
+          onConnect(activeClient, safeResolve, safeReject);
+        } catch (err) {
+          safeReject(err);
+        }
       });
     };
     connect();
@@ -106,165 +121,10 @@ function createServer(events, tracker = createFakeTracker()) {
   return server;
 }
 
-test('SocketServer handles fragmentation inside a UTF-8 multibyte character', { timeout: 5000 }, async () => {
-  const events = [];
-  const server = createServer(events);
-  
-  try {
-    const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
-      let data = '';
-      client.on('data', chunk => {
-        data += chunk.toString();
-        if (data.includes('\n')) client.end();
-      });
-      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
-      
-      const payload = Buffer.from('{"type":"session_start","message":"👋"}\n', 'utf8');
-      const emojiStart = payload.indexOf(Buffer.from('👋'));
-      
-      // Split inside the emoji (first 2 bytes)
-      client.write(payload.subarray(0, emojiStart + 2));
-      setTimeout(() => client.write(payload.subarray(emojiStart + 2)), 10);
-    });
-    
-    assert.equal(events.length, 1);
-    assert.equal(events[0].message, '👋');
-    assert.equal(JSON.parse(responses[0]).status, 'ok');
-  } finally {
-    server.stop();
-  }
-});
-
-test('SocketServer respects exactly 1 MiB limit', { timeout: 5000 }, async () => {
-  const events = [];
-  const server = createServer(events);
-  
-  try {
-    const MAX_FRAME_SIZE = 1024 * 1024;
-    const basePayload = '{"type":"session_start","message":"';
-    const endPayload = '"}';
-    const paddingLength = MAX_FRAME_SIZE - basePayload.length - endPayload.length;
-    
-    // Exactly 1 MiB valid
-    const validMessage = Buffer.from(basePayload + 'A'.repeat(paddingLength) + endPayload + '\n');
-    assert.equal(validMessage.length - 1, MAX_FRAME_SIZE);
-    
-    const validResponses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
-      let data = '';
-      client.on('data', chunk => {
-        data += chunk.toString();
-        if (data.includes('\n')) client.end();
-      });
-      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
-      client.write(validMessage);
-    });
-    assert.equal(JSON.parse(validResponses[0]).status, 'ok');
-    
-    // Exactly 1 MiB + 1 byte invalid
-    const invalidMessage = Buffer.from(basePayload + 'A'.repeat(paddingLength + 1) + endPayload + '\n');
-    assert.equal(invalidMessage.length - 1, MAX_FRAME_SIZE + 1);
-    
-    const invalidResponses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
-      let data = '';
-      client.on('data', chunk => {
-        data += chunk.toString();
-      });
-      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
-      client.write(invalidMessage);
-    });
-    
-    assert.equal(invalidResponses.length, 1);
-    assert.equal(JSON.parse(invalidResponses[0]).status, 'error');
-    assert.equal(JSON.parse(invalidResponses[0]).code, 'message_too_large');
-  } finally {
-    server.stop();
-  }
-});
-
-test('SocketServer oversized frame followed by valid frame produces exactly one error', { timeout: 5000 }, async () => {
-  const events = [];
-  const server = createServer(events);
-  
-  try {
-    const MAX_FRAME_SIZE = 1024 * 1024;
-    const badMessage = '{"type":"session_start","message":"' + 'A'.repeat(MAX_FRAME_SIZE) + '"}\n';
-    const goodMessage = '{"type":"session_start","message":"good"}\n';
-    
-    const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
-      let data = '';
-      client.on('data', chunk => {
-        data += chunk.toString();
-      });
-      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
-      client.write(badMessage + goodMessage);
-    });
-    
-    assert.equal(events.length, 0);
-    assert.equal(responses.length, 1);
-    assert.equal(JSON.parse(responses[0]).status, 'error');
-    assert.equal(JSON.parse(responses[0]).code, 'message_too_large');
-  } finally {
-    server.stop();
-  }
-});
-
-test('SocketServer rejects multibyte frame chars < 1MB but bytes > 1MB', { timeout: 5000 }, async () => {
-  const events = [];
-  const server = createServer(events);
-  
-  try {
-    const MAX_FRAME_SIZE = 1024 * 1024;
-    // 3 bytes per char, 350,000 chars = 1,050,000 bytes > 1 MB, but chars < 1 MB
-    const badMessage = Buffer.from('{"type":"session_start","message":"' + '日'.repeat(350000) + '"}\n', 'utf8');
-    
-    const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
-      let data = '';
-      client.on('data', chunk => {
-        data += chunk.toString();
-      });
-      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
-      client.write(badMessage);
-    });
-    
-    assert.equal(events.length, 0);
-    assert.equal(responses.length, 1);
-    assert.equal(JSON.parse(responses[0]).status, 'error');
-    assert.equal(JSON.parse(responses[0]).code, 'message_too_large');
-  } finally {
-    server.stop();
-  }
-});
-
-test('SocketServer catches exceptions from tracker and onEvent', { timeout: 5000 }, async () => {
-  const events = [];
-  const tracker = createFakeTracker();
-  tracker.addSession = () => { throw new Error('Tracker boom'); };
-  
-  const server = createServer(events, tracker);
-  
-  try {
-    const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
-      let data = '';
-      client.on('data', chunk => {
-        data += chunk.toString();
-        if (data.includes('\n')) client.end();
-      });
-      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
-      client.write('{"type":"session_start","sessionId":"s-1"}\n');
-    });
-    
-    assert.equal(responses.length, 1);
-    assert.equal(JSON.parse(responses[0]).status, 'error');
-    assert.equal(JSON.parse(responses[0]).code, 'internal_error');
-  } finally {
-    server.stop();
-  }
-});
-
 test('SocketServer handles missing protocolVersion as v1 and sends ok', { timeout: 5000 }, async () => {
   const events = [];
   const server = createServer(events);
-  
+
   try {
     const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
       let data = '';
@@ -273,10 +133,9 @@ test('SocketServer handles missing protocolVersion as v1 and sends ok', { timeou
         if (data.includes('\n')) client.end();
       });
       client.on('end', () => resolve(data.split('\n').filter(Boolean)));
-      
       client.write('{"type": "session_start", "sessionId": "s-1"}\n');
     });
-    
+
     assert.equal(events.length, 1);
     assert.equal(responses.length, 1);
     assert.equal(JSON.parse(responses[0]).status, 'ok');
@@ -306,10 +165,14 @@ test('SocketServer rejects syntactically invalid JSON', { timeout: 5000 }, async
   }
 });
 
-test('SocketServer rejects invalid optional fields', { timeout: 5000 }, async () => {
+test('SocketServer rejects invalid optional fields and verifies zero tracker calls', { timeout: 5000 }, async () => {
   const events = [];
-  const server = createServer(events);
-  
+  let addSessionCalls = 0;
+  const tracker = createFakeTracker();
+  tracker.addSession = () => { addSessionCalls++; };
+
+  const server = createServer(events, tracker);
+
   try {
     const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
       let data = '';
@@ -325,8 +188,9 @@ test('SocketServer rejects invalid optional fields', { timeout: 5000 }, async ()
       client.write('{"type":"session_start","timestamp":"bad"}\n');
       client.write('{"type":"session_start","metadata":[]}\n');
     });
-    
+
     assert.equal(events.length, 0);
+    assert.equal(addSessionCalls, 0);
     assert.equal(responses.length, 4);
     for (let i = 0; i < 4; i++) {
       assert.equal(JSON.parse(responses[i]).status, 'error');
@@ -340,7 +204,7 @@ test('SocketServer rejects invalid optional fields', { timeout: 5000 }, async ()
 test('SocketServer processes two complete messages in the same chunk', { timeout: 5000 }, async () => {
   const events = [];
   const server = createServer(events);
-  
+
   try {
     const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
       let data = '';
@@ -353,11 +217,207 @@ test('SocketServer processes two complete messages in the same chunk', { timeout
       client.on('end', () => resolve(data.split('\n').filter(Boolean)));
       client.write('{"type": "session_start"}\n{"type": "session_end"}\n');
     });
-    
+
     assert.equal(events.length, 2);
     assert.equal(responses.length, 2);
     assert.equal(JSON.parse(responses[0]).received, 'session_start');
     assert.equal(JSON.parse(responses[1]).received, 'session_end');
+  } finally {
+    server.stop();
+  }
+});
+
+test('SocketServer handles fragmentation inside a UTF-8 multibyte character', { timeout: 5000 }, async () => {
+  const events = [];
+  const server = createServer(events);
+
+  try {
+    const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
+      let data = '';
+      client.on('data', chunk => {
+        data += chunk.toString();
+        if (data.includes('\n')) client.end();
+      });
+      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
+
+      const payload = Buffer.from('{"type":"session_start","message":"👋"}\n', 'utf8');
+      const emojiStart = payload.indexOf(Buffer.from('👋'));
+
+      client.write(payload.subarray(0, emojiStart + 2));
+      setTimeout(() => client.write(payload.subarray(emojiStart + 2)), 10);
+    });
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].message, '👋');
+    assert.equal(JSON.parse(responses[0]).status, 'ok');
+  } finally {
+    server.stop();
+  }
+});
+
+test('SocketServer respects exactly 1 MiB limit', { timeout: 5000 }, async () => {
+  const events = [];
+  const server = createServer(events);
+
+  try {
+    const MAX_FRAME_SIZE = 1024 * 1024;
+    const basePayload = '{"type":"session_start","message":"';
+    const endPayload = '"}';
+    const paddingLength = MAX_FRAME_SIZE - basePayload.length - endPayload.length;
+
+    // Exactly 1 MiB valid
+    const validMessage = Buffer.from(basePayload + 'A'.repeat(paddingLength) + endPayload + '\n');
+    assert.equal(validMessage.length - 1, MAX_FRAME_SIZE);
+
+    const validResponses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
+      let data = '';
+      client.on('data', chunk => {
+        data += chunk.toString();
+        if (data.includes('\n')) client.end();
+      });
+      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
+      client.write(validMessage);
+    });
+    assert.equal(events.length, 1);
+    assert.equal(JSON.parse(validResponses[0]).status, 'ok');
+
+    // Exactly 1 MiB + 1 byte invalid
+    events.length = 0;
+    const invalidMessage = Buffer.from(basePayload + 'A'.repeat(paddingLength + 1) + endPayload + '\n');
+    assert.equal(invalidMessage.length - 1, MAX_FRAME_SIZE + 1);
+
+    const invalidResponses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
+      let data = '';
+      client.on('data', chunk => {
+        data += chunk.toString();
+      });
+      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
+      client.write(invalidMessage);
+    });
+
+    assert.equal(events.length, 0); // No events dispatched
+    assert.equal(invalidResponses.length, 1);
+    assert.equal(JSON.parse(invalidResponses[0]).status, 'error');
+    assert.equal(JSON.parse(invalidResponses[0]).code, 'message_too_large');
+  } finally {
+    server.stop();
+  }
+});
+
+test('SocketServer oversized frame followed by valid frame produces exactly one error', { timeout: 5000 }, async () => {
+  const events = [];
+  const server = createServer(events);
+
+  try {
+    const MAX_FRAME_SIZE = 1024 * 1024;
+    const badMessage = '{"type":"session_start","message":"' + 'A'.repeat(MAX_FRAME_SIZE) + '"}\n';
+    const goodMessage = '{"type":"session_start","message":"good"}\n';
+
+    const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
+      let data = '';
+      client.on('data', chunk => {
+        data += chunk.toString();
+      });
+      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
+      client.write(badMessage + goodMessage);
+    });
+
+    assert.equal(events.length, 0);
+    assert.equal(responses.length, 1);
+    assert.equal(JSON.parse(responses[0]).status, 'error');
+    assert.equal(JSON.parse(responses[0]).code, 'message_too_large');
+  } finally {
+    server.stop();
+  }
+});
+
+test('SocketServer rejects multibyte frame chars < 1MB but bytes > 1MB', { timeout: 5000 }, async () => {
+  const events = [];
+  const server = createServer(events);
+
+  try {
+    // 3 bytes per char, 350,000 chars = 1,050,000 bytes > 1 MB, but chars < 1 MB
+    const badMessage = Buffer.from('{"type":"session_start","message":"' + '日'.repeat(350000) + '"}\n', 'utf8');
+
+    const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
+      let data = '';
+      client.on('data', chunk => {
+        data += chunk.toString();
+      });
+      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
+      client.write(badMessage);
+    });
+
+    assert.equal(events.length, 0);
+    assert.equal(responses.length, 1);
+    assert.equal(JSON.parse(responses[0]).status, 'error');
+    assert.equal(JSON.parse(responses[0]).code, 'message_too_large');
+  } finally {
+    server.stop();
+  }
+});
+
+test('SocketServer catches exceptions from tracker', { timeout: 5000 }, async () => {
+  const events = [];
+  const tracker = createFakeTracker();
+  tracker.addSession = () => { throw new Error('Tracker boom'); };
+
+  const server = createServer(events, tracker);
+
+  try {
+    const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
+      let data = '';
+      client.on('data', chunk => {
+        data += chunk.toString();
+        if (data.includes('\n')) client.end();
+      });
+      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
+      client.write('{"type":"session_start","sessionId":"s-1"}\n');
+    });
+
+    assert.equal(responses.length, 1);
+    assert.equal(JSON.parse(responses[0]).status, 'error');
+    assert.equal(JSON.parse(responses[0]).code, 'internal_error');
+  } finally {
+    server.stop();
+  }
+});
+
+test('SocketServer catches exceptions from onEvent and verifies auto-registration side-effects', { timeout: 5000 }, async () => {
+  let eventsCalled = 0;
+  const tracker = createFakeTracker();
+  let addSessionCalled = false;
+  tracker.addSession = () => { addSessionCalled = true; };
+
+  const endpoint = getUniqueTestEndpoint();
+  const server = new SocketServer(tracker, () => {
+    eventsCalled++;
+    throw new Error('onEvent boom');
+  }, endpoint, true);
+  server.start();
+
+  try {
+    const responses = await connectWithRetry(server.getEndpoint(), (client, resolve) => {
+      let data = '';
+      client.on('data', chunk => {
+        data += chunk.toString();
+        if (data.includes('\n')) client.end();
+      });
+      client.on('end', () => resolve(data.split('\n').filter(Boolean)));
+      // A non-start/end event with sessionId will trigger auto-registration, then the onEvent
+      client.write('{"type":"approval_needed","sessionId":"s-1","tool":"test"}\n');
+    });
+
+    // The auto-registration side effect should have been executed before the onEvent exception
+    assert.equal(addSessionCalled, true);
+
+    // eventsCalled will be 2: one for auto-registered session_start, which triggers the first throw.
+    // So the original approval_needed won't even be reached in onEvent.
+    assert.equal(eventsCalled, 1);
+
+    assert.equal(responses.length, 1);
+    assert.equal(JSON.parse(responses[0]).status, 'error');
+    assert.equal(JSON.parse(responses[0]).code, 'internal_error');
   } finally {
     server.stop();
   }

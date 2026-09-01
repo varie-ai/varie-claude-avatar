@@ -59,19 +59,29 @@ export class SocketServer {
         rawBuffer = Buffer.concat([rawBuffer, data]);
 
         let newlineIndex;
-        while ((newlineIndex = rawBuffer.indexOf(10)) !== -1) {
-          if (newlineIndex > MAX_FRAME_SIZE) {
+        let offset = 0;
+
+        while ((newlineIndex = rawBuffer.indexOf(10, offset)) !== -1) {
+          if (newlineIndex - offset > MAX_FRAME_SIZE) {
             overflowed = true;
             socket.write(JSON.stringify({ status: 'error', code: 'message_too_large' }) + '\n', () => socket.destroy());
             return;
           }
 
-          const frameBuffer = rawBuffer.subarray(0, newlineIndex);
-          rawBuffer = rawBuffer.subarray(newlineIndex + 1);
+          const frameBuffer = rawBuffer.subarray(offset, newlineIndex);
+          offset = newlineIndex + 1;
 
           const lineStr = frameBuffer.toString('utf8').trim();
           if (lineStr) {
             this.handleMessage(lineStr, socket);
+          }
+        }
+
+        if (offset > 0) {
+          if (offset === rawBuffer.length) {
+            rawBuffer = Buffer.alloc(0);
+          } else {
+            rawBuffer = Buffer.from(rawBuffer.subarray(offset));
           }
         }
 
@@ -191,7 +201,7 @@ export class SocketServer {
       }
 
       this.onEvent(typedEvent);
-      
+
       if (socket.writable) {
         socket.write(JSON.stringify({ status: 'ok', received: typedEvent.type }) + '\n');
       }
