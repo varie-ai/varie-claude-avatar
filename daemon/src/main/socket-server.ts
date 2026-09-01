@@ -3,9 +3,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { SessionTracker } from './session-tracker';
+import { getIpcEndpoint } from '../../../shared/ipc-endpoint.cjs';
 
 export interface ClaudeEvent {
-  type: 'session_start' | 'session_end' | 'approval_needed' | 'tool_complete' | 'stop' | 'subagent_stop' | 'user_prompt' | 'notification' | 'attention' | 'reload_character';
+  protocolVersion?: number;
+  type: 'session_start' | 'session_end' | 'approval_needed' | 'tool_complete' |
+    'stop' | 'subagent_stop' | 'user_prompt' | 'notification' | 'attention' |
+    'reload_character' | 'question' | 'plan_complete' | 'question_complete';
   sessionId?: string;
   tool?: string;
   message?: string;
@@ -25,10 +29,12 @@ export class SocketServer {
     this.sessionTracker = sessionTracker;
     this.onEvent = onEvent;
 
-    // Socket path - use /tmp on macOS/Linux
-    this.socketPath = process.platform === 'win32'
-      ? '\\\\.\\pipe\\varie-claude-avatar'
-      : '/tmp/varie-claude-avatar.sock';
+    // Socket path - use deterministic shared logic
+    this.socketPath = getIpcEndpoint();
+  }
+
+  getEndpoint(): string {
+    return this.socketPath;
   }
 
   start(): void {
@@ -86,6 +92,11 @@ export class SocketServer {
   private handleMessage(message: string, socket: net.Socket): void {
     try {
       const event = JSON.parse(message) as ClaudeEvent;
+      const version = event.protocolVersion ?? 1;
+      if (version !== 1) {
+        socket.write(JSON.stringify({ status: 'error', code: 'unsupported_protocol' }) + '\n');
+        return;
+      }
       event.timestamp = event.timestamp || Date.now();
 
       console.log('Received event:', event.type, event.sessionId);
