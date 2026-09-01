@@ -13,7 +13,7 @@
     "watch": "npm run build && concurrently \"npm run watch:main\" \"npm run watch:renderer\"",
     "watch:main": "esbuild src/main/index.ts --bundle --platform=node --external:electron --outfile=dist/main/index.js --watch",
     "watch:renderer": "esbuild src/renderer/index.ts --bundle --platform=browser --format=iife --loader:.js=js --outfile=dist/renderer/index.js --watch",
-    "test:node": "node --test ../tests/node/*.test.cjs",
+    "test:node": "node ../tests/node/run-tests.cjs",
     "test": "npm run test:node",
     "package": "electron-builder",
     "package:mac": "electron-builder --mac",

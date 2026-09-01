@@ -11,6 +11,7 @@ test('renderer build is implemented by a platform-neutral Node script', () => {
   assert.doesNotMatch(JSON.stringify(pkg.scripts), /mkdir -p|\bcp\s/);
 });
 
-test('node tests have a root-relative command', () => {
-  assert.equal(pkg.scripts['test:node'], 'node --test ../tests/node/*.test.cjs');
+test('node tests invoke the test runner script', () => {
+  assert.equal(pkg.scripts['test:node'], 'node ../tests/node/run-tests.cjs');
+  assert.doesNotMatch(pkg.scripts['test:node'], /\*/);
 });
