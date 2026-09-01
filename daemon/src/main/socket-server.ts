@@ -5,8 +5,6 @@ import * as os from 'os';
 import { SessionTracker } from './session-tracker';
 import { getIpcEndpoint } from '../../../shared/ipc-endpoint.cjs';
 
-import { StringDecoder } from 'node:string_decoder';
-
 export interface ClaudeEvent {
   protocolVersion?: number;
   type: 'session_start' | 'session_end' | 'approval_needed' | 'tool_complete' |
@@ -52,27 +50,35 @@ export class SocketServer {
     }
 
     this.server = net.createServer((socket) => {
-      let buffer = '';
-      const decoder = new StringDecoder('utf8');
+      let rawBuffer = Buffer.alloc(0);
+      let overflowed = false;
 
       socket.on('data', (data: Buffer) => {
-        buffer += decoder.write(data);
+        if (overflowed) return;
+
+        rawBuffer = Buffer.concat([rawBuffer, data]);
 
         let newlineIndex;
-        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-          const line = buffer.slice(0, newlineIndex);
-          buffer = buffer.slice(newlineIndex + 1);
-          if (line.trim()) {
-            this.handleMessage(line.trim(), socket);
+        while ((newlineIndex = rawBuffer.indexOf(10)) !== -1) {
+          if (newlineIndex > MAX_FRAME_SIZE) {
+            overflowed = true;
+            socket.write(JSON.stringify({ status: 'error', code: 'message_too_large' }) + '\n', () => socket.destroy());
+            return;
+          }
+
+          const frameBuffer = rawBuffer.subarray(0, newlineIndex);
+          rawBuffer = rawBuffer.subarray(newlineIndex + 1);
+
+          const lineStr = frameBuffer.toString('utf8').trim();
+          if (lineStr) {
+            this.handleMessage(lineStr, socket);
           }
         }
-        if (buffer.length > MAX_FRAME_SIZE) {
-          socket.write(JSON.stringify({ status: 'error', message: 'message_too_large' }) + '\n');
-          socket.destroy();
+
+        if (rawBuffer.length > MAX_FRAME_SIZE) {
+          overflowed = true;
+          socket.write(JSON.stringify({ status: 'error', code: 'message_too_large' }) + '\n', () => socket.destroy());
         }
-      });
-      socket.on('end', () => {
-         buffer += decoder.end();
       });
 
       socket.on('error', (err) => {
@@ -131,44 +137,70 @@ export class SocketServer {
       socket.write(JSON.stringify({ status: 'error', code: 'invalid_event' }) + '\n');
       return;
     }
+    if (event.tool !== undefined && typeof event.tool !== 'string') {
+      socket.write(JSON.stringify({ status: 'error', code: 'invalid_event' }) + '\n');
+      return;
+    }
+    if (event.message !== undefined && typeof event.message !== 'string') {
+      socket.write(JSON.stringify({ status: 'error', code: 'invalid_event' }) + '\n');
+      return;
+    }
+    if (event.timestamp !== undefined && (typeof event.timestamp !== 'number' || !Number.isFinite(event.timestamp))) {
+      socket.write(JSON.stringify({ status: 'error', code: 'invalid_event' }) + '\n');
+      return;
+    }
+    if (event.metadata !== undefined && (!event.metadata || typeof event.metadata !== 'object' || Array.isArray(event.metadata))) {
+      socket.write(JSON.stringify({ status: 'error', code: 'invalid_event' }) + '\n');
+      return;
+    }
 
     const typedEvent = event as ClaudeEvent;
     typedEvent.timestamp = typeof typedEvent.timestamp === 'number' ? typedEvent.timestamp : Date.now();
 
-    let autoRegistered = false;
-    if (typedEvent.sessionId && typedEvent.type !== 'session_end' && typedEvent.type !== 'session_start') {
-      if (!this.sessionTracker.getSession(typedEvent.sessionId)) {
-        this.sessionTracker.addSession(typedEvent.sessionId, typedEvent.metadata);
-        autoRegistered = true;
+    try {
+      let autoRegistered = false;
+      if (typedEvent.sessionId && typedEvent.type !== 'session_end' && typedEvent.type !== 'session_start') {
+        if (!this.sessionTracker.getSession(typedEvent.sessionId)) {
+          this.sessionTracker.addSession(typedEvent.sessionId, typedEvent.metadata);
+          autoRegistered = true;
+        }
+      }
+
+      switch (typedEvent.type) {
+        case 'session_start':
+          if (typedEvent.sessionId) this.sessionTracker.addSession(typedEvent.sessionId, typedEvent.metadata);
+          break;
+        case 'session_end':
+          if (typedEvent.sessionId) this.sessionTracker.removeSession(typedEvent.sessionId);
+          break;
+        case 'approval_needed':
+          if (typedEvent.sessionId) this.sessionTracker.addPendingApproval(typedEvent.sessionId, typedEvent.tool || 'unknown');
+          break;
+        case 'tool_complete':
+          if (typedEvent.sessionId) this.sessionTracker.clearPendingApproval(typedEvent.sessionId);
+          break;
+      }
+
+      if (autoRegistered) {
+        this.onEvent({
+          type: 'session_start',
+          sessionId: typedEvent.sessionId,
+          timestamp: typedEvent.timestamp,
+          metadata: typedEvent.metadata,
+        });
+      }
+
+      this.onEvent(typedEvent);
+      
+      if (socket.writable) {
+        socket.write(JSON.stringify({ status: 'ok', received: typedEvent.type }) + '\n');
+      }
+    } catch (err) {
+      console.error('Event listener exception:', err);
+      if (socket.writable) {
+        socket.write(JSON.stringify({ status: 'error', code: 'internal_error' }) + '\n');
       }
     }
-
-    switch (typedEvent.type) {
-      case 'session_start':
-        if (typedEvent.sessionId) this.sessionTracker.addSession(typedEvent.sessionId, typedEvent.metadata);
-        break;
-      case 'session_end':
-        if (typedEvent.sessionId) this.sessionTracker.removeSession(typedEvent.sessionId);
-        break;
-      case 'approval_needed':
-        if (typedEvent.sessionId) this.sessionTracker.addPendingApproval(typedEvent.sessionId, typedEvent.tool || 'unknown');
-        break;
-      case 'tool_complete':
-        if (typedEvent.sessionId) this.sessionTracker.clearPendingApproval(typedEvent.sessionId);
-        break;
-    }
-
-    if (autoRegistered) {
-      this.onEvent({
-        type: 'session_start',
-        sessionId: typedEvent.sessionId,
-        timestamp: typedEvent.timestamp,
-        metadata: typedEvent.metadata,
-      });
-    }
-
-    this.onEvent(typedEvent);
-    socket.write(JSON.stringify({ status: 'ok', received: typedEvent.type }) + '\n');
   }
 
   private writeSocketInfo(): void {
