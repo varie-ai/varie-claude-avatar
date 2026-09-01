@@ -7,14 +7,14 @@ const ts = require('../../daemon/node_modules/typescript');
 
 test('TypeScript resolves getIpcEndpoint from shared module without implicit any', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-test-'));
-  
+
   test.after(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   const testFile = path.join(tempDir, 'temp-ts-test.ts');
   const sharedModulePath = path.join(__dirname, '../../shared/ipc-endpoint.cjs').replace(/\\/g, '/');
-  
+
   // Create a virtual program
   const sourceText = `
 import { getIpcEndpoint } from '${sharedModulePath}';
@@ -34,9 +34,9 @@ const endpoint = getIpcEndpoint('win32', 'C:\\\\Users\\\\Bob');
   const program = ts.createProgram([testFile], compilerOptions);
   const checker = program.getTypeChecker();
   const sourceFile = program.getSourceFile(testFile);
-  
+
   let getIpcEndpointSymbol = undefined;
-  
+
   function visit(node) {
     if (ts.isCallExpression(node)) {
       const exprText = node.expression.getText(sourceFile);
@@ -51,10 +51,10 @@ const endpoint = getIpcEndpoint('win32', 'C:\\\\Users\\\\Bob');
     }
     ts.forEachChild(node, visit);
   }
-  
+
   visit(sourceFile);
   assert.ok(getIpcEndpointSymbol, 'getIpcEndpoint should be found and type-checked');
-  
+
   const diagnostics = ts.getPreEmitDiagnostics(program, sourceFile);
   const errors = diagnostics.map(d => typeof d.messageText === 'string' ? d.messageText : d.messageText.messageText);
   assert.ok(!errors.some(e => e.includes('Could not find a declaration file')), 'Should not have TS7016: ' + errors.join(', '));

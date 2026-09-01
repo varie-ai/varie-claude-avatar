@@ -38,7 +38,7 @@ function getUniqueTestEndpoint() {
   return path.join('/tmp', `vca-test-${process.pid}-${rand}.sock`);
 }
 
-async function connectWithRetry(endpoint, onConnect) {
+async function connectWithRetry(endpoint, onConnect, netModule = net) {
   return new Promise((resolve, reject) => {
     let retries = 10;
     let timer;
@@ -76,29 +76,39 @@ async function connectWithRetry(endpoint, onConnect) {
 
     const connect = () => {
       if (ended) return;
-      activeClient = net.createConnection(endpoint);
-      activeClient.on('error', (err) => {
-        if (activeClient) activeClient.destroy();
-        activeClient = null;
-        if (ended) return;
+      try {
+        const client = netModule.createConnection(endpoint);
+        activeClient = client;
 
-        if (err.code === 'ENOENT' && retries > 0) {
-          retries--;
-          timer = setTimeout(connect, 50);
-        } else {
-          safeReject(err);
-        }
-      });
+        client.on('error', (err) => {
+          if (activeClient === client) {
+            client.destroy();
+            activeClient = null;
+          } else {
+            client.destroy();
+          }
+          if (ended) return;
 
-      activeClient.on('connect', () => {
-        if (ended) return;
-        clearTimeout(timer);
-        try {
-          onConnect(activeClient, safeResolve, safeReject);
-        } catch (err) {
-          safeReject(err);
-        }
-      });
+          if (err && err.code === 'ENOENT' && retries > 0) {
+            retries--;
+            timer = setTimeout(connect, 50);
+          } else {
+            safeReject(err);
+          }
+        });
+
+        client.on('connect', () => {
+          if (ended) return;
+          clearTimeout(timer);
+          try {
+            onConnect(client, safeResolve, safeReject);
+          } catch (err) {
+            safeReject(err);
+          }
+        });
+      } catch (err) {
+        safeReject(err);
+      }
     };
     connect();
   });
@@ -411,8 +421,8 @@ test('SocketServer catches exceptions from onEvent and verifies auto-registratio
     // The auto-registration side effect should have been executed before the onEvent exception
     assert.equal(addSessionCalled, true);
 
-    // eventsCalled will be 2: one for auto-registered session_start, which triggers the first throw.
-    // So the original approval_needed won't even be reached in onEvent.
+    // eventsCalled will be 1: the exception on synthetic session_start aborts the flow on the first callback,
+    // so the original approval_needed event is not reached in onEvent.
     assert.equal(eventsCalled, 1);
 
     assert.equal(responses.length, 1);
@@ -421,4 +431,21 @@ test('SocketServer catches exceptions from onEvent and verifies auto-registratio
   } finally {
     server.stop();
   }
+});
+
+test('connectWithRetry safely handles synchronous throw in createConnection', { timeout: 5000 }, async () => {
+  const fakeNet = {
+    createConnection: () => {
+      throw new Error('synchronous net failure');
+    },
+  };
+
+  let rejected = false;
+  try {
+    await connectWithRetry('fake-endpoint', () => {}, fakeNet);
+  } catch (err) {
+    rejected = true;
+    assert.equal(err.message, 'synchronous net failure');
+  }
+  assert.equal(rejected, true, 'Promise must reject on synchronous throw');
 });
