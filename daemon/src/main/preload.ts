@@ -1,4 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type {
+  TerminalAction,
+  TerminalActionCapabilities,
+  TerminalActionResult,
+} from './terminal-actions/terminal-action-service';
 
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
@@ -25,8 +30,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings: unknown) => ipcRenderer.invoke('save-settings', settings),
 
-  // Send approval to terminal
-  sendApproval: (sessionId: string) => ipcRenderer.send('send-approval', sessionId),
+  // Terminal actions (capability driven; Windows v1 reports none)
+  getTerminalActionCapabilities: () =>
+    ipcRenderer.invoke('get-terminal-action-capabilities') as Promise<TerminalActionCapabilities>,
+  performTerminalAction: (action: TerminalAction, sessionId: string) =>
+    ipcRenderer.invoke('perform-terminal-action', action, sessionId) as Promise<TerminalActionResult>,
 
   // Window controls
   quit: () => ipcRenderer.send('quit-app'),
@@ -72,7 +80,11 @@ declare global {
       setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => void;
       getSettings: () => Promise<unknown>;
       saveSettings: (settings: unknown) => Promise<void>;
-      sendApproval: (sessionId: string) => void;
+      getTerminalActionCapabilities: () => Promise<TerminalActionCapabilities>;
+      performTerminalAction: (
+        action: TerminalAction,
+        sessionId: string
+      ) => Promise<TerminalActionResult>;
       getActiveCharacterId: () => Promise<string>;
       loadCharacterBundle: (id: string) => Promise<Buffer>;
       onLoadCharacter: (callback: (characterId: string) => void) => void;
