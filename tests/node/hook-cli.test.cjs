@@ -176,7 +176,9 @@ test('--ensure routes through the daemon boundary, other events do not', async (
   const withEnsure = makeDeps({ argv: ['session-start', '--ensure'] });
   await cli.main(withEnsure.deps);
   assert.equal(withEnsure.ensured.length, 1);
-  assert.deepEqual(withEnsure.ensured[0], { eventName: 'session-start' });
+  assert.equal(withEnsure.ensured[0].eventName, 'session-start');
+  assert.equal(withEnsure.ensured[0].endpoint, 'test-endpoint', 'the boundary receives the shared endpoint');
+  assert.equal(typeof withEnsure.ensured[0].log, 'function', 'the boundary receives the hook logger');
   assert.equal(withEnsure.sent.length, 1);
 
   const withoutEnsure = makeDeps({ argv: ['stop'] });
@@ -185,9 +187,39 @@ test('--ensure routes through the daemon boundary, other events do not', async (
   assert.equal(withoutEnsure.sent.length, 1);
 });
 
-test('the default ensureDaemon is an inert Task 4 boundary', async () => {
-  const result = await cli.ensureDaemon({ eventName: 'session-start' });
-  assert.deepEqual(result, { ensured: false, reason: 'not_implemented' });
+test('the default ensureDaemon delegates to the daemon lifecycle', async () => {
+  const spawns = [];
+  const installs = [];
+
+  const result = await cli.ensureDaemon({
+    eventName: 'session-start',
+    endpoint: 'test-endpoint',
+    probe: async () => true,
+    spawn: () => { spawns.push('spawn'); return { unref() {} }; },
+    install: async () => { installs.push('install'); },
+  });
+
+  assert.equal(result, 'running');
+  assert.deepEqual(spawns, [], 'a running daemon must not be launched again');
+  assert.deepEqual(installs, []);
+});
+
+test('the daemon boundary hands over to the installer when nothing is installed', async () => {
+  const installs = [];
+
+  const result = await cli.ensureDaemon({
+    eventName: 'session-start',
+    endpoint: 'test-endpoint',
+    platform: 'win32',
+    env: {},
+    probe: async () => false,
+    exists: () => false,
+    spawn: () => { throw new Error('nothing may be launched'); },
+    install: async (info) => { installs.push(info); },
+  });
+
+  assert.equal(result, 'installing');
+  assert.equal(installs.length, 1);
 });
 
 test('a failing daemon boundary never blocks delivery of the event', async () => {

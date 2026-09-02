@@ -5,6 +5,7 @@ const os = require('node:os');
 const { getIpcEndpoint } = require('../../shared/ipc-endpoint.cjs');
 const { parseHookInput, buildEvent, MAX_STDIN_BYTES } = require('./lib/event.cjs');
 const { sendEvent } = require('./lib/transport.cjs');
+const { ensureDaemon: ensureDaemonLifecycle } = require('./lib/daemon-lifecycle.cjs');
 
 /**
  * Appends a diagnostic line to the local hook log.
@@ -116,12 +117,14 @@ function readStdin(deps = {}) {
 /**
  * Boundary for the cross-platform daemon lifecycle.
  *
- * Task 3 only recognizes `--ensure` and routes it through this seam. Probing,
- * launching and installing the daemon are Task 4 work and are deliberately NOT
- * implemented here; this placeholder performs no I/O and never blocks a hook.
+ * `--ensure` routes through this seam, which probes the endpoint and, when
+ * needed, launches the installed application or hands over to the detached
+ * installer. Every collaborator is forwarded so the whole path stays
+ * injectable; it resolves to 'running', 'launched' or 'installing' and never
+ * throws.
  */
-async function ensureDaemon() {
-  return { ensured: false, reason: 'not_implemented' };
+async function ensureDaemon(info = {}) {
+  return ensureDaemonLifecycle(info);
 }
 
 /** Applies the wrapper fallbacks; values coming from stdin always win. */
@@ -166,9 +169,11 @@ async function main(deps = {}) {
       return { delivered: false, rejected: true, reason: parsed.reason };
     }
 
+    const endpoint = endpointFn();
+
     if (options.ensure) {
       try {
-        await ensureFn({ eventName: options.eventName });
+        await ensureFn({ eventName: options.eventName, endpoint, log });
       } catch (error) {
         log(`Daemon bootstrap failed for '${options.eventName}' (${errorCode(error)})`);
       }
@@ -176,7 +181,7 @@ async function main(deps = {}) {
 
     const hookInput = applyArgumentFallbacks(parsed.value, options);
     const event = buildFn(options.eventName, hookInput, deps.context ?? {});
-    await sendFn(endpointFn(), event);
+    await sendFn(endpoint, event);
 
     return { delivered: true, rejected: false };
   } catch (error) {
