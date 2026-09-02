@@ -19,6 +19,49 @@ const STRING_FIELDS = ['session_id', 'tool_name', 'message', 'notification_type'
 // Values read out of `tool_input`, validated as strings.
 const TOOL_INPUT_STRING_FIELDS = ['command', 'file_path'];
 
+/**
+ * Environment variables that identify the terminal emulator hosting a session:
+ * the window, never the shell running inside it.
+ *
+ * TERM_PROGRAM is set by the emulator itself and already carries its name, so
+ * it is reported verbatim and comes first: an integrated terminal running
+ * inside another one is the innermost host, and it is the one that names
+ * itself. WT_SESSION only proves Windows Terminal is present -- its value is a
+ * session GUID -- so the name is a constant and the GUID never reaches the wire.
+ *
+ * Deliberately excluded: ComSpec and SHELL name a command interpreter, and TERM
+ * describes terminfo capabilities. Neither identifies an emulator.
+ */
+const TERMINAL_INDICATORS = Object.freeze([
+  { variable: 'TERM_PROGRAM', name: (value) => value },
+  { variable: 'WT_SESSION', name: () => 'Windows Terminal' },
+]);
+
+/** A stable identifier is usable only when it is a string with content. */
+function usableString(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+/**
+ * Identifies the terminal emulator, or nothing at all.
+ *
+ * Precedence: an explicit value from the caller, then the first reliable
+ * environment indicator, then undefined. A terminal is never invented, and an
+ * unusable explicit value falls through instead of hiding a real indicator.
+ */
+function resolveTerminal(explicit, env) {
+  const provided = usableString(explicit);
+  if (provided !== undefined) return provided;
+
+  const source = isPlainObject(env) ? env : {};
+  for (const indicator of TERMINAL_INDICATORS) {
+    const raw = usableString(source[indicator.variable]);
+    if (raw !== undefined) return indicator.name(raw);
+  }
+
+  return undefined;
+}
+
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -93,8 +136,8 @@ function buildEvent(eventName, hookInput = {}, context = {}) {
   const cwd = context.cwd ?? process.cwd();
   const projectPath = cwd;
   const project = extractFileBasename(projectPath) || 'root';
-  const terminal = context.terminal ?? undefined;
   const env = context.env ?? process.env;
+  const terminal = resolveTerminal(context.terminal, env);
 
   const sessionId =
     asString(input.session_id) ||
@@ -142,6 +185,10 @@ function buildEvent(eventName, hookInput = {}, context = {}) {
   const metadata = {
     project,
     projectPath,
+    // The canonical working directory of the session. projectPath carries the
+    // same value and stays: the renderer reads it, and so do events emitted by
+    // clients older than this release.
+    cwd,
     summary: summary.slice(0, MAX_SUMMARY_LENGTH),
   };
   if (terminal !== undefined) {

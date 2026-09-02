@@ -19,6 +19,7 @@ test('Bash summary preserves quotes and collapses whitespace', () => {
     metadata: {
       project: 'avatar',
       projectPath: 'C:\\work\\avatar',
+      cwd: 'C:\\work\\avatar',
       summary: 'git commit -m "hello world" && git push',
       terminal: 'Windows Terminal',
     },
@@ -297,4 +298,142 @@ test('buildEvent ignores non-string hook fields when called directly', () => {
   assert.equal(event.sessionId, 'ctx');
   assert.equal(event.tool, undefined);
   assert.equal(event.metadata.summary, '');
+});
+
+// ---------------------------------------------------------------------------
+// F2: the stable session identifiers must leave the client.
+//
+// `cwd` is the working directory of the session. `projectPath` is the display
+// value derived from it and is kept for the renderer and for events emitted by
+// older clients. A terminal emulator is the window hosting the session -- not
+// the shell running inside it -- so it is reported only when something reliable
+// identifies it.
+// ---------------------------------------------------------------------------
+
+test('the canonical cwd is emitted beside the legacy projectPath', () => {
+  const event = buildEvent('session-start', {}, {
+    cwd: 'C:\\work\\my repo', now: 1, env: {}, sessionId: 's',
+  });
+
+  assert.equal(event.metadata.cwd, 'C:\\work\\my repo');
+  assert.equal(
+    event.metadata.projectPath,
+    'C:\\work\\my repo',
+    'projectPath must stay: the renderer and legacy events still read it',
+  );
+  assert.equal(event.metadata.project, 'my repo');
+});
+
+test('cwd falls back to the process working directory, exactly like projectPath', () => {
+  const event = buildEvent('stop', {}, { now: 1, env: {}, sessionId: 's' });
+
+  assert.equal(event.metadata.cwd, process.cwd());
+  assert.equal(event.metadata.projectPath, process.cwd());
+});
+
+test('an explicit terminal wins over every environment indicator', () => {
+  const event = buildEvent('stop', {}, {
+    cwd: '/repo', now: 1, sessionId: 's', terminal: 'Ghostty',
+    env: { TERM_PROGRAM: 'Apple_Terminal', WT_SESSION: '7b1f0f7c-0b6d-4a2f' },
+  });
+
+  assert.equal(event.metadata.terminal, 'Ghostty');
+});
+
+test('TERM_PROGRAM identifies the terminal on macOS and POSIX, verbatim', () => {
+  for (const reported of ['Apple_Terminal', 'iTerm.app', 'vscode', 'WarpTerminal']) {
+    const event = buildEvent('stop', {}, {
+      cwd: '/repo', now: 1, sessionId: 's', env: { TERM_PROGRAM: reported },
+    });
+
+    assert.equal(event.metadata.terminal, reported, 'the emulator names itself; do not rename it');
+  }
+});
+
+test('WT_SESSION identifies Windows Terminal without publishing its GUID', () => {
+  const guid = '7b1f0f7c-0b6d-4a2f-9a4a-1d0e2c3b4a59';
+  const event = buildEvent('stop', {}, {
+    cwd: 'C:\\repo', now: 1, sessionId: 's', env: { WT_SESSION: guid },
+  });
+
+  assert.equal(event.metadata.terminal, 'Windows Terminal');
+  assert.ok(
+    !JSON.stringify(event).includes(guid),
+    'the session GUID is an indicator, not something to put on the wire',
+  );
+});
+
+test('a self-reported terminal wins over an indicator that must be interpreted', () => {
+  // Running inside Windows Terminal, an integrated terminal still sets
+  // TERM_PROGRAM; the innermost host that names itself is the real answer.
+  const event = buildEvent('stop', {}, {
+    cwd: 'C:\\repo', now: 1, sessionId: 's',
+    env: { TERM_PROGRAM: 'vscode', WT_SESSION: '7b1f0f7c-0b6d-4a2f' },
+  });
+
+  assert.equal(event.metadata.terminal, 'vscode');
+});
+
+test('no terminal is invented when nothing reliable identifies one', () => {
+  const cases = [
+    {},
+    { TERM_PROGRAM: '' },
+    { TERM_PROGRAM: '   ' },
+    { WT_SESSION: '' },
+    { WT_SESSION: '  ' },
+    { TERM: 'xterm-256color' },
+    { SHELL: '/bin/zsh' },
+    { ComSpec: 'C:\\WINDOWS\\system32\\cmd.exe' },
+    { TERM_PROGRAM_VERSION: '1.2.3' },
+  ];
+
+  for (const env of cases) {
+    const event = buildEvent('stop', {}, { cwd: '/repo', now: 1, sessionId: 's', env });
+
+    assert.ok(
+      !('terminal' in event.metadata),
+      `${JSON.stringify(env)} must not produce a terminal`,
+    );
+  }
+});
+
+test('a shell is never mistaken for a terminal emulator', () => {
+  // ComSpec and SHELL name the command interpreter. Using either would label
+  // every cmd.exe session as a terminal it may not be running in.
+  const event = buildEvent('stop', {}, {
+    cwd: 'C:\\repo', now: 1, sessionId: 's',
+    env: {
+      ComSpec: 'C:\\WINDOWS\\system32\\cmd.exe',
+      SHELL: '/bin/bash',
+      WT_SESSION: '7b1f0f7c-0b6d-4a2f',
+    },
+  });
+
+  assert.equal(event.metadata.terminal, 'Windows Terminal', 'only the emulator indicator counts');
+});
+
+test('an unusable explicit terminal falls through instead of shadowing the environment', () => {
+  for (const terminal of ['', '   ', '\t\n', 42, null, {}, []]) {
+    const event = buildEvent('stop', {}, {
+      cwd: '/repo', now: 1, sessionId: 's', terminal,
+      env: { TERM_PROGRAM: 'Apple_Terminal' },
+    });
+
+    assert.equal(
+      event.metadata.terminal,
+      'Apple_Terminal',
+      `${JSON.stringify(terminal)} must not shadow a real indicator`,
+    );
+  }
+});
+
+test('the session id and protocol version are unaffected by the new metadata', () => {
+  const explicit = buildEvent('session-start', { session_id: 's-9' }, {
+    cwd: '/repo', now: 1, env: {}, pid: 7,
+  });
+  assert.equal(explicit.sessionId, 's-9');
+  assert.equal(explicit.protocolVersion, 1);
+
+  const fallback = buildEvent('session-start', {}, { cwd: '/repo', now: 1, env: {}, pid: 7 });
+  assert.equal(fallback.sessionId, '7');
 });

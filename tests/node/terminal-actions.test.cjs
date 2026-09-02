@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 const MAIN_DIR = path.join(REPO_ROOT, 'daemon', 'src', 'main');
@@ -369,26 +370,6 @@ test('preload exposes only the two terminal-action functions', () => {
   assert.ok(!/exposeInMainWorld\(\s*['"][^'"]+['"]\s*,\s*ipcRenderer\s*\)/.test(source));
 });
 
-test('the renderer keeps no terminal-action call to action in this release', () => {
-  const rendererDir = path.join(REPO_ROOT, 'daemon', 'src', 'renderer');
-  const offenders = [];
-
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) { walk(full); continue; }
-      if (!/\.(ts|js|html)$/.test(entry.name)) continue;
-      const source = fs.readFileSync(full, 'utf8');
-      if (/performTerminalAction|sendApproval|getTerminalActionCapabilities/.test(source)) {
-        offenders.push(full);
-      }
-    }
-  };
-  walk(rendererDir);
-
-  assert.deepEqual(offenders, [], 'Windows v1 ships no focus or approve call to action');
-});
-
 // --- result contract enforcement --------------------------------------------
 
 const CONTRACT_REASONS = ['unsupported', 'session_not_found', 'terminal_not_found', 'automation_denied'];
@@ -487,4 +468,208 @@ test('an adapter answer that is not a result object is refused', async () => {
       `${String(answer)} must not cross the boundary`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// F3: the renderer check must prove it looked at the renderer.
+//
+// Discovery and detection are separate, injectable functions so the sabotage
+// cases below can show that an empty or truncated scan fails instead of
+// reporting a clean result.
+// ---------------------------------------------------------------------------
+
+const RENDERER_DIR = path.join(REPO_ROOT, 'daemon', 'src', 'renderer');
+const RENDERER_SOURCE = /\.(ts|js|html)$/;
+const TERMINAL_ACTION_REFERENCE = /performTerminalAction|sendApproval|getTerminalActionCapabilities/;
+
+/** Every renderer source file that could carry a call to action. */
+function collectRendererSources(dir = RENDERER_DIR, fsModule = fs) {
+  const found = [];
+
+  const walk = (current) => {
+    for (const entry of fsModule.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (RENDERER_SOURCE.test(entry.name)) found.push(full);
+    }
+  };
+
+  walk(dir);
+  return found.sort();
+}
+
+/**
+ * Files that reference a terminal action.
+ *
+ * Refuses to answer for an empty file list: "no offenders" is only meaningful
+ * once something has actually been read.
+ */
+function findTerminalActionOffenders(files, readFile = (file) => fs.readFileSync(file, 'utf8')) {
+  if (files.length === 0) {
+    throw new Error('renderer discovery returned no files: an empty result proves nothing');
+  }
+  return files.filter((file) => TERMINAL_ACTION_REFERENCE.test(readFile(file)));
+}
+
+/** The renderer sources git tracks: an independent view of the same set. */
+function trackedRendererSources(t) {
+  let output;
+  try {
+    output = execFileSync('git', ['ls-files', 'daemon/src/renderer'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    });
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      t.skip('git is not available in this environment');
+      return null;
+    }
+    throw error;
+  }
+
+  return output
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && RENDERER_SOURCE.test(line))
+    .sort();
+}
+
+const toRepoRelative = (file) => path.relative(REPO_ROOT, file).split(path.sep).join('/');
+
+test('renderer discovery finds exactly the renderer sources git tracks', (t) => {
+  const tracked = trackedRendererSources(t);
+  if (tracked === null) return;
+
+  const discovered = collectRendererSources().map(toRepoRelative);
+
+  assert.ok(discovered.length > 0, 'the renderer must not be empty');
+  assert.deepEqual(discovered, tracked, 'every tracked renderer source must be scanned, and no other');
+});
+
+test('the scanned set includes the renderer entry point and the notification manager', () => {
+  const discovered = collectRendererSources().map(toRepoRelative);
+
+  for (const required of [
+    'daemon/src/renderer/index.ts',
+    'daemon/src/renderer/notifications/notification-manager.ts',
+  ]) {
+    assert.ok(discovered.includes(required), `${required} must be scanned`);
+  }
+
+  assert.ok(discovered.length >= 3, 'a scan of one sentinel file is not a scan');
+});
+
+test('the renderer keeps no terminal-action call to action in this release', () => {
+  const files = collectRendererSources();
+  const offenders = findTerminalActionOffenders(files).map(toRepoRelative);
+
+  assert.ok(files.length > 0, 'the property is only meaningful over a non-empty scan');
+  assert.deepEqual(offenders, [], 'Windows v1 ships no focus or approve call to action');
+});
+
+test('an empty or broken discovery fails instead of reporting a clean renderer', () => {
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'vca-renderer-empty-'));
+  try {
+    assert.deepEqual(collectRendererSources(empty), [], 'nothing to find in an empty directory');
+    assert.throws(
+      () => findTerminalActionOffenders(collectRendererSources(empty)),
+      /returned no files/,
+      'an empty scan must not look like a clean result',
+    );
+  } finally {
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test('a call to action inside a discovered file is detected', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'vca-renderer-fixture-'));
+  try {
+    fs.mkdirSync(path.join(fixture, 'notifications'));
+    fs.writeFileSync(path.join(fixture, 'index.ts'), 'export const ok = true;\n');
+    fs.writeFileSync(
+      path.join(fixture, 'notifications', 'notification-manager.ts'),
+      "element.addEventListener('click', () => window.electronAPI.performTerminalAction('approve', id));\n",
+    );
+    fs.writeFileSync(path.join(fixture, 'ignored.css'), 'performTerminalAction\n');
+
+    const files = collectRendererSources(fixture);
+    assert.equal(files.length, 2, 'only source files are scanned');
+
+    const offenders = findTerminalActionOffenders(files).map((file) => path.basename(file));
+    assert.deepEqual(offenders, ['notification-manager.ts']);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('a discovery that skips files cannot pass the tracked cross-check', (t) => {
+  const tracked = trackedRendererSources(t);
+  if (tracked === null) return;
+
+  // A scanner that reads one sentinel file and stops would report no offenders.
+  const sentinelOnly = collectRendererSources().slice(0, 1).map(toRepoRelative);
+
+  assert.equal(findTerminalActionOffenders(collectRendererSources().slice(0, 1)).length, 0);
+  assert.notDeepEqual(sentinelOnly, tracked, 'the cross-check is what makes that impossible to hide');
+});
+
+// ---------------------------------------------------------------------------
+// F1: the documentation may describe the adapter, but not promise a click.
+// ---------------------------------------------------------------------------
+
+const README_PATH = path.join(REPO_ROOT, 'README.md');
+
+const CLICK = /\bclick(?:s|ed|ing)?\b/i;
+const DRIVES_TERMINAL = /\bfocus(?:es|ing)?\b[^.]{0,40}\bterminal\b|\bsend(?:s|ing)?\b[^.]{0,30}\bapprov/i;
+const NEGATED = /\b(?:not|never|no|none|only|without|cannot|neither|nor|would)\b/i;
+const ADAPTER_CAPABILITY = /\b(adapter|TerminalActions|terminal[- ]action)\b[^.]{0,140}\b(focus|approv)/i;
+const NOT_WIRED = /\b(no|not|never|nothing)\b[^.]{0,100}\b(invoke|reach|call|wire|control|ui|click|connect)/i;
+
+const sentencesOf = (text) => text
+  .split(/(?<=[.!?])\s+|\n/)
+  .map((sentence) => sentence.trim())
+  .filter(Boolean);
+
+const paragraphsOf = (text) => text
+  .split(/\n\s*\n/)
+  .map((paragraph) => paragraph.trim())
+  .filter(Boolean);
+
+test('the README never presents a notification click as focusing or approving', () => {
+  const offenders = sentencesOf(fs.readFileSync(README_PATH, 'utf8'))
+    .filter((sentence) => CLICK.test(sentence)
+      && DRIVES_TERMINAL.test(sentence)
+      && !NEGATED.test(sentence));
+
+  assert.deepEqual(
+    offenders,
+    [],
+    'no renderer code path invokes a terminal action, so no click may be documented as doing so',
+  );
+});
+
+test('any passage crediting the adapter with focus or approve says nothing invokes it', () => {
+  const offenders = paragraphsOf(fs.readFileSync(README_PATH, 'utf8'))
+    .filter((paragraph) => ADAPTER_CAPABILITY.test(paragraph) && !NOT_WIRED.test(paragraph));
+
+  assert.deepEqual(
+    offenders,
+    [],
+    'an adapter that exists is not an adapter the UI can reach; say so where it is described',
+  );
+});
+
+test('the README still documents the adapter rather than deleting it', () => {
+  // The rules above must not push an author into removing the architecture.
+  const readme = fs.readFileSync(README_PATH, 'utf8');
+
+  assert.match(readme, /adapter/i, 'the platform adapters stay documented');
+  assert.match(readme, /dismiss/i, 'the actual click behaviour stays documented');
+  assert.ok(
+    paragraphsOf(readme).some((paragraph) => ADAPTER_CAPABILITY.test(paragraph)),
+    'the macOS adapter capability is still described as available architecture',
+  );
 });

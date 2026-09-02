@@ -89,7 +89,7 @@ This typically only affects manual `.dmg` installs.
 - Notification badges with project name, tool info, and command summaries
 - Click to dismiss — keeps your workspace uncluttered
 
-  On **macOS**, clicking a notification can also focus the originating terminal and send the approval keystroke. On **Windows**, this first release **only dismisses the notification**: it does not focus a terminal and never sends approval input on your behalf. Approve in Claude Code as usual.
+  A click **only dismisses the notification** — on macOS and Windows alike, that is all it does in this release. It does not focus a terminal and never sends approval input on your behalf; approve in Claude Code as usual. A macOS adapter that *can* focus a terminal and send an approval keystroke does exist behind the terminal-action IPC boundary, but no click and no UI control invokes it today. On **Windows** that adapter is disabled outright and reports every request as unsupported.
 
 ### 🎨 Character Library
 - Browse and switch characters from the [Varie](https://varie.ai) character library
@@ -267,7 +267,7 @@ plugin/                              daemon/
 
 One Node.js hook client serves every platform. Claude Code invokes it in exec form (`node` plus an argument vector), so no shell parses the command and paths containing spaces are safe. The endpoint is resolved by `shared/ipc-endpoint.cjs`: `/tmp/varie-claude-avatar.sock` on macOS, and a named pipe derived from the user's home directory on Windows, so two accounts on the same machine never share one.
 
-`TerminalActions` is platform-selected: the macOS adapter focuses the terminal and can send an approval keystroke, while the Windows adapter is deliberately disabled in this release and reports every request as unsupported.
+`TerminalActions` is platform-selected: the macOS adapter is able to focus a terminal and send an approval keystroke, while the Windows adapter is deliberately disabled and reports every request as unsupported. Both sit behind the preload IPC boundary, and neither is reached in this release — no renderer control invokes a terminal action, so a click only dismisses. The boundary is the extension point a later release builds on, not a feature shipping today.
 
 ### Project Structure
 

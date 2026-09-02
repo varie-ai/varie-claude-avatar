@@ -2,6 +2,22 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+/** A stable identifier is usable only when it is a string with content. */
+function usableString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+/**
+ * Working directory of a session.
+ *
+ * Precedence: the canonical `cwd`, then the legacy `projectPath` that older
+ * clients are the only ones to send, then nothing. An unusable canonical value
+ * never shadows a usable legacy one, so `cwd: ''` cannot erase a real path.
+ */
+function resolveCwd(metadata?: Record<string, unknown>): string | undefined {
+  return usableString(metadata?.cwd) ?? usableString(metadata?.projectPath);
+}
+
 export interface Session {
   id: string;
   startedAt: number;
@@ -26,8 +42,11 @@ export class SessionTracker {
   private state: SessionState;
   private statePath: string;
 
-  constructor() {
-    const configDir = path.join(os.homedir(), '.varie-claude-avatar');
+  /**
+   * `configDir` exists so tests can point a tracker at a temporary directory.
+   * The default is the real per-user state directory, unchanged.
+   */
+  constructor(configDir: string = path.join(os.homedir(), '.varie-claude-avatar')) {
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true });
     }
@@ -70,8 +89,8 @@ export class SessionTracker {
     this.state.sessions.push({
       id,
       startedAt: Date.now(),
-      terminal: metadata?.terminal as string,
-      cwd: metadata?.cwd as string,
+      terminal: usableString(metadata?.terminal),
+      cwd: resolveCwd(metadata),
       metadata,
     });
 

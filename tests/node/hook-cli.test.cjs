@@ -127,7 +127,7 @@ test('a valid hook payload is delivered once to the shared endpoint', async () =
     sessionId: 's-1',
     tool: 'Bash',
     timestamp: 100,
-    metadata: { project: 'repo', projectPath: '/repo', summary: 'ls -la' },
+    metadata: { project: 'repo', projectPath: '/repo', cwd: '/repo', summary: 'ls -la' },
   });
   assert.deepEqual(logs, []);
   assert.deepEqual(exitCodes, [0]);
