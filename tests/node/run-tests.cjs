@@ -31,7 +31,9 @@ function runTests(options = {}) {
     return;
   }
 
-  const result = spawnFn(execPath, ['--test', ...testFiles], {
+  // --test-concurrency=1 keeps suites strictly sequential: hook transport and
+  // socket-server tests bind real endpoints and must not race each other.
+  const result = spawnFn(execPath, ['--test', '--test-concurrency=1', ...testFiles], {
     stdio: 'inherit',
     windowsHide: true,
   });

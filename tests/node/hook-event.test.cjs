@@ -156,13 +156,145 @@ test('sessionId fallback hierarchy works correctly', () => {
   assert.equal(e4.sessionId, '999');
 });
 
-test('parseHookInput parses valid JSON and handles malformed input gracefully', () => {
-  assert.deepEqual(parseHookInput('{"tool_name":"Bash"}'), { tool_name: 'Bash' });
-  assert.deepEqual(parseHookInput(''), {});
-  assert.deepEqual(parseHookInput('not json'), {});
+test('parseHookInput accepts a JSON object and returns the validated fields', () => {
+  const result = parseHookInput('{"session_id":"s","tool_name":"Bash","tool_input":{"command":"ls"}}');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, {
+    session_id: 's',
+    tool_name: 'Bash',
+    tool_input: { command: 'ls' },
+  });
 });
 
-test('parseHookInput rejects input exceeding MAX_STDIN_BYTES (1 MiB)', () => {
-  const hugeText = '{"a":"' + 'x'.repeat(MAX_STDIN_BYTES + 10) + '"}';
-  assert.deepEqual(parseHookInput(hugeText), {});
+test('parseHookInput treats absent stdin as a valid empty object', () => {
+  for (const empty of ['', '   ', '\n\t ']) {
+    const result = parseHookInput(empty);
+    assert.equal(result.ok, true, `${JSON.stringify(empty)} must be accepted`);
+    assert.deepEqual(result.value, {});
+  }
+});
+
+test('parseHookInput rejects malformed JSON distinguishably from an empty object', () => {
+  const result = parseHookInput('not json');
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'malformed');
+  assert.equal(result.value, undefined);
+
+  const emptyObject = parseHookInput('{}');
+  assert.equal(emptyObject.ok, true);
+  assert.deepEqual(emptyObject.value, {});
+});
+
+test('parseHookInput rejects JSON primitives', () => {
+  for (const primitive of ['null', 'true', 'false', '42', '"a string"']) {
+    const result = parseHookInput(primitive);
+    assert.equal(result.ok, false, `${primitive} must be rejected`);
+    assert.equal(result.reason, 'not_object', `${primitive} rejection reason`);
+  }
+});
+
+test('parseHookInput rejects JSON arrays', () => {
+  const result = parseHookInput('[{"tool_name":"Bash"}]');
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'not_object');
+});
+
+test('parseHookInput rejects non-string input', () => {
+  const result = parseHookInput(Buffer.from('{}'));
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'malformed');
+});
+
+test('parseHookInput drops fields that are not strings instead of trusting them', () => {
+  const result = parseHookInput(JSON.stringify({
+    session_id: 12345,
+    tool_name: ['Bash'],
+    message: { text: 'hi' },
+    notification_type: null,
+    agent_type: false,
+    tool_input: { command: 99, file_path: '/a/b.ts' },
+  }));
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, { tool_input: { file_path: '/a/b.ts' } });
+});
+
+test('parseHookInput drops a tool_input that is not a plain object', () => {
+  const arrayInput = parseHookInput('{"tool_name":"Bash","tool_input":["ls"]}');
+  assert.equal(arrayInput.ok, true);
+  assert.deepEqual(arrayInput.value, { tool_name: 'Bash' });
+
+  const stringInput = parseHookInput('{"tool_name":"Bash","tool_input":"ls"}');
+  assert.equal(stringInput.ok, true);
+  assert.deepEqual(stringInput.value, { tool_name: 'Bash' });
+});
+
+test('parseHookInput accepts exactly MAX_STDIN_BYTES and rejects one byte more', () => {
+  const envelope = '{"message":"' + '"}';
+  const padding = 'x'.repeat(MAX_STDIN_BYTES - envelope.length);
+  const exact = '{"message":"' + padding + '"}';
+  assert.equal(Buffer.byteLength(exact, 'utf8'), MAX_STDIN_BYTES);
+
+  const accepted = parseHookInput(exact);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.value.message.length, padding.length);
+
+  const tooLarge = '{"message":"' + padding + 'x"}';
+  assert.equal(Buffer.byteLength(tooLarge, 'utf8'), MAX_STDIN_BYTES + 1);
+
+  const rejected = parseHookInput(tooLarge);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, 'oversize');
+});
+
+test('every Task 3 hook event maps to its wire event type', () => {
+  const mapping = [
+    ['session-start', 'session_start'],
+    ['session-end', 'session_end'],
+    ['approval-needed', 'approval_needed'],
+    ['question', 'question'],
+    ['tool-complete', 'tool_complete'],
+    ['plan-complete', 'plan_complete'],
+    ['question-complete', 'question_complete'],
+    ['subagent-start', 'subagent_start'],
+    ['stop', 'stop'],
+    ['subagent-stop', 'subagent_stop'],
+    ['user-prompt', 'user_prompt'],
+    ['notification', 'notification'],
+  ];
+
+  for (const [cliEvent, wireType] of mapping) {
+    const event = buildEvent(cliEvent, {}, { cwd: '/repo', now: 7, sessionId: 's' });
+    assert.equal(event.type, wireType, `${cliEvent} must map to ${wireType}`);
+    assert.equal(event.protocolVersion, 1);
+    assert.equal(event.timestamp, 7);
+  }
+});
+
+test('project name is derived from Windows and POSIX working directories', () => {
+  const windows = buildEvent('stop', {}, { cwd: 'C:\\Users\\dev\\My Project', now: 1, sessionId: 's' });
+  assert.equal(windows.metadata.project, 'My Project');
+  assert.equal(windows.metadata.projectPath, 'C:\\Users\\dev\\My Project');
+
+  const windowsUnc = buildEvent('stop', {}, { cwd: '\\\\server\\share\\repo', now: 1, sessionId: 's' });
+  assert.equal(windowsUnc.metadata.project, 'repo');
+
+  const posix = buildEvent('stop', {}, { cwd: '/home/dev/my-project', now: 1, sessionId: 's' });
+  assert.equal(posix.metadata.project, 'my-project');
+  assert.equal(posix.metadata.projectPath, '/home/dev/my-project');
+
+  const posixRoot = buildEvent('stop', {}, { cwd: '/', now: 1, sessionId: 's' });
+  assert.equal(posixRoot.metadata.project, 'root');
+});
+
+test('buildEvent ignores non-string hook fields when called directly', () => {
+  const event = buildEvent('approval-needed', {
+    session_id: 42,
+    tool_name: 7,
+    message: { a: 1 },
+  }, { cwd: '/repo', now: 1, sessionId: 'ctx', env: {} });
+
+  assert.equal(event.sessionId, 'ctx');
+  assert.equal(event.tool, undefined);
+  assert.equal(event.metadata.summary, '');
 });

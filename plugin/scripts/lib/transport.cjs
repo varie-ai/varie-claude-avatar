@@ -1,111 +1,233 @@
 const net = require('node:net');
 
-function sendOnce(endpoint, event, timeoutMs, netModule = net) {
+const DEFAULT_ATTEMPTS = 3;
+
+// Absolute wall-clock deadline for a single attempt. It is armed once, before
+// the connection is opened, and is never rearmed by socket activity.
+const DEFAULT_ACK_TIMEOUT_MS = 750;
+
+// Hard ceiling for the whole sendEvent call, retries and back-off included, so
+// a 1-second Claude Code hook timeout is never reached.
+const DEFAULT_TOTAL_BUDGET_MS = 900;
+
+const DEFAULT_RETRY_DELAY_MS = 100;
+
+// An acknowledgement is a single short JSON line. Anything larger is a broken
+// or hostile peer, not a daemon.
+const MAX_ACK_BYTES = 4096;
+
+// Transient failures to OPEN the connection. They can only happen before the
+// payload is written, so retrying them cannot duplicate an event.
+const RETRYABLE_CONNECT_CODES = new Set(['ENOENT', 'ECONNREFUSED']);
+
+const DEFAULT_TIMERS = { setTimeout, clearTimeout };
+
+/**
+ * Only a transient connection-open failure is worth retrying. Once the payload
+ * has been written the daemon may already have processed it, so a timeout, a
+ * closed connection, a malformed acknowledgement or a server error must fail
+ * the delivery instead of duplicating the event.
+ */
+function isRetryableConnectError(error) {
+  if (!error || error.afterWrite === true) return false;
+  return RETRYABLE_CONNECT_CODES.has(error.code);
+}
+
+function transportError(message, code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+/**
+ * Performs exactly one delivery attempt: connect, write one newline-delimited
+ * event, wait for the acknowledgement line, then release every resource.
+ */
+function sendOnce(endpoint, event, options = {}) {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_ACK_TIMEOUT_MS;
+  const netModule = options.netModule ?? net;
+  const timers = options.timers ?? DEFAULT_TIMERS;
+  const maxAckBytes = options.maxAckBytes ?? MAX_ACK_BYTES;
+
   return new Promise((resolve, reject) => {
+    let payload;
+    try {
+      payload = JSON.stringify(event) + '\n';
+    } catch {
+      reject(transportError('Event could not be serialized', 'E_SERIALIZE'));
+      return;
+    }
+
     let socket = null;
-    let buffer = '';
+    let deadline = null;
     let settled = false;
+    let cleaned = false;
+    let wrotePayload = false;
+    let ackBytes = 0;
+    let ackBuffer = '';
 
     const cleanup = () => {
-      if (socket) {
-        socket.removeAllListeners();
-        socket.destroy();
-        socket = null;
+      if (cleaned) return;
+      cleaned = true;
+
+      if (deadline !== null) {
+        timers.clearTimeout(deadline);
+        deadline = null;
+      }
+
+      const target = socket;
+      socket = null;
+      if (target) {
+        target.removeAllListeners();
+        // Keep a sink listener so a late error from destroy() cannot escape as
+        // an unhandled 'error' event.
+        target.on('error', () => {});
+        target.destroy();
       }
     };
 
-    const safeReject = (err) => {
-      if (!settled) {
-        settled = true;
-        cleanup();
-        reject(err);
-      }
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      if (wrotePayload) error.afterWrite = true;
+      cleanup();
+      reject(error);
     };
 
-    const safeResolve = () => {
-      if (!settled) {
-        settled = true;
-        cleanup();
-        resolve();
-      }
+    const succeed = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
     };
+
+    deadline = timers.setTimeout(() => {
+      fail(transportError(`Transport acknowledgement timed out after ${timeoutMs}ms`, 'ETIMEDOUT'));
+    }, timeoutMs);
 
     try {
       socket = netModule.createConnection(endpoint);
-
-      socket.setTimeout(timeoutMs, () => {
-        const err = new Error(`Transport acknowledgement timed out after ${timeoutMs}ms`);
-        err.code = 'ETIMEDOUT';
-        safeReject(err);
-      });
-
-      socket.on('error', (err) => {
-        safeReject(err);
-      });
-
-      socket.on('connect', () => {
-        try {
-          const payload = JSON.stringify(event) + '\n';
-          socket.write(payload);
-        } catch (err) {
-          safeReject(err);
-        }
-      });
-
-      socket.on('data', (chunk) => {
-        buffer += chunk.toString('utf8');
-        if (buffer.includes('\n')) {
-          const line = buffer.split('\n')[0].trim();
-          try {
-            const resp = JSON.parse(line);
-            if (resp.status === 'ok') {
-              safeResolve();
-            } else if (resp.status === 'error' && resp.code === 'unsupported_protocol') {
-              const err = new Error('Unsupported protocol version');
-              err.code = 'E_PROTOCOL';
-              safeReject(err);
-            } else {
-              const err = new Error(resp.message || resp.code || 'Server returned error');
-              err.code = resp.code || 'E_SERVER_ERROR';
-              safeReject(err);
-            }
-          } catch (err) {
-            safeReject(err);
-          }
-        }
-      });
-    } catch (err) {
-      safeReject(err);
+    } catch (error) {
+      fail(error);
+      return;
     }
+
+    socket.on('error', (error) => {
+      fail(error);
+    });
+
+    socket.on('close', () => {
+      fail(transportError('Transport connection closed before acknowledgement', 'E_CLOSED'));
+    });
+
+    socket.on('connect', () => {
+      try {
+        socket.write(payload);
+        wrotePayload = true;
+      } catch (error) {
+        if (!error.code) error.code = 'E_WRITE';
+        fail(error);
+      }
+    });
+
+    socket.on('data', (chunk) => {
+      if (settled) return;
+
+      ackBytes += chunk.length;
+      if (ackBytes > maxAckBytes) {
+        fail(transportError(
+          `Acknowledgement exceeded ${maxAckBytes} bytes`,
+          'E_ACK_OVERFLOW',
+        ));
+        return;
+      }
+
+      ackBuffer += chunk.toString('utf8');
+      const newlineIndex = ackBuffer.indexOf('\n');
+      if (newlineIndex === -1) return;
+
+      const line = ackBuffer.slice(0, newlineIndex).trim();
+
+      let response;
+      try {
+        response = JSON.parse(line);
+      } catch {
+        // Deliberately does not echo the line: acknowledgement bodies never
+        // reach an error message or a log.
+        fail(transportError('Acknowledgement was not valid JSON', 'E_ACK_MALFORMED'));
+        return;
+      }
+
+      if (typeof response !== 'object' || response === null || Array.isArray(response)) {
+        fail(transportError('Acknowledgement was not a JSON object', 'E_ACK_MALFORMED'));
+        return;
+      }
+
+      if (response.status === 'ok') {
+        succeed();
+        return;
+      }
+
+      if (response.code === 'unsupported_protocol') {
+        fail(transportError('Unsupported protocol version', 'E_PROTOCOL'));
+        return;
+      }
+
+      fail(transportError(
+        `Daemon rejected the event (${response.code || 'unknown'})`,
+        response.code || 'E_SERVER_ERROR',
+      ));
+    });
   });
 }
 
+/**
+ * Sends one event with bounded retries and a bounded total wall-clock cost.
+ */
 async function sendEvent(endpoint, event, options = {}) {
-  const attempts = options.attempts ?? 3;
-  const timeoutMs = options.timeoutMs ?? 750;
+  const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_ACK_TIMEOUT_MS;
+  const totalBudgetMs = options.totalBudgetMs ?? DEFAULT_TOTAL_BUDGET_MS;
+  const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const delay = options.delay ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const netModule = options.netModule ?? net;
+  const timers = options.timers ?? DEFAULT_TIMERS;
+  const now = options.now ?? Date.now;
 
+  const budgetEnd = now() + totalBudgetMs;
   let lastError = null;
-  for (let attempt = 0; attempt < attempts; attempt++) {
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const remaining = budgetEnd - now();
+    if (remaining <= 0) break;
+
     try {
-      await sendOnce(endpoint, event, timeoutMs, netModule);
+      await sendOnce(endpoint, event, {
+        timeoutMs: Math.min(timeoutMs, remaining),
+        netModule,
+        timers,
+        maxAckBytes: options.maxAckBytes,
+      });
       return;
     } catch (error) {
       lastError = error;
-      if (error && error.code === 'E_PROTOCOL') {
-        throw error;
-      }
-      if (attempt + 1 < attempts) {
-        await delay(100 * (attempt + 1));
-      }
+      if (!isRetryableConnectError(error)) throw error;
+      if (attempt + 1 >= attempts) break;
+
+      const backoffMs = retryDelayMs * (attempt + 1);
+      if (now() + backoffMs >= budgetEnd) break;
+      await delay(backoffMs);
     }
   }
 
-  throw lastError || new Error('Failed to send event');
+  throw lastError || transportError('Failed to send event', 'E_NO_ATTEMPT');
 }
 
 module.exports = {
+  DEFAULT_ACK_TIMEOUT_MS,
+  DEFAULT_TOTAL_BUDGET_MS,
+  MAX_ACK_BYTES,
+  isRetryableConnectError,
   sendOnce,
   sendEvent,
 };

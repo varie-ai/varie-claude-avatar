@@ -40,6 +40,28 @@ test('runTests logs error and exits 1 if no test files found', () => {
   assert.match(loggedErrors[0], /No test files found/);
 });
 
+test('runTests forces the Node test runner to execute suites sequentially', () => {
+  let spawnArgs = null;
+  const fakeFs = {
+    readdirSync: () => [
+      { name: 'a.test.cjs', isFile: () => true },
+      { name: 'b.test.cjs', isFile: () => true },
+    ],
+  };
+
+  runTests({
+    dir: '/fake/tests',
+    fs: fakeFs,
+    spawnSync: (execPath, args) => { spawnArgs = args; return { status: 0, signal: null, error: null }; },
+    exit: () => {},
+  });
+
+  assert.ok(spawnArgs.includes('--test-concurrency=1'),
+    'suites must never run concurrently');
+  assert.ok(spawnArgs.indexOf('--test-concurrency=1') < spawnArgs.indexOf(path.join('/fake/tests', 'a.test.cjs')),
+    'runner flags must precede the test files');
+});
+
 test('runTests spawns process.execPath with explicit arguments and no shell', () => {
   let spawnArgs = null;
   let exitCode = null;
@@ -62,7 +84,7 @@ test('runTests spawns process.execPath with explicit arguments and no shell', ()
   });
 
   assert.equal(spawnArgs.execPath, '/path/to/custom-node');
-  assert.deepEqual(spawnArgs.args, ['--test', path.join('/fake/tests', 'sample.test.cjs')]);
+  assert.deepEqual(spawnArgs.args, ['--test', '--test-concurrency=1', path.join('/fake/tests', 'sample.test.cjs')]);
   assert.equal(spawnArgs.options.stdio, 'inherit');
   assert.equal(spawnArgs.options.windowsHide, true);
   assert.equal(spawnArgs.options.shell, undefined);
