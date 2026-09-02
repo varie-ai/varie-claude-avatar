@@ -1,49 +1,68 @@
 # Avatar Status
 
-Check the status of the Varie Claude Avatar daemon and current character.
+Check the status of the Varie Claude Avatar daemon and the current character, on
+macOS or Windows.
+
+## Where Things Live
+
+| | macOS | Windows 10 1809+ / 11 (x64) |
+|---|---|---|
+| Installed app | `~/Applications/Varie Claude Avatar.app` or `/Applications/Varie Claude Avatar.app` | `%LOCALAPPDATA%\Programs\Varie Claude Avatar\Varie Claude Avatar.exe` |
+| State directory | `~/.varie-claude-avatar/` | `%USERPROFILE%\.varie-claude-avatar\` |
+| IPC endpoint | Unix socket `/tmp/varie-claude-avatar.sock` | named pipe `\\.\pipe\varie-claude-avatar-<user key>` |
+
+The endpoint is an implementation detail — do not test for it directly. On
+macOS a socket file outlives a crashed daemon, so its presence proves nothing.
 
 ## Instructions
 
-Run these checks and present the results:
-
 ### 1. Daemon Status
 
-```bash
-# Check if socket exists (daemon is running)
-test -S /tmp/varie-claude-avatar.sock && echo "RUNNING" || echo "NOT_RUNNING"
-
-# Get daemon info (PID, start time)
-cat ~/.varie-claude-avatar/daemon.json 2>/dev/null
-```
-
-### 2. Active Character
+Ask the daemon:
 
 ```bash
-cat ~/.varie-claude-avatar/config.json 2>/dev/null
+# macOS / any POSIX shell
+node "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs" status
 ```
 
-If the file doesn't exist, the default character (Beatriz) is active.
+```powershell
+# Windows PowerShell
+node "$env:CLAUDE_PLUGIN_ROOT\scripts\varie-avatar-hook.cjs" status
+```
+
+This opens one short, bounded connection to the endpoint for this user and
+prints exactly `RUNNING` or `NOT_RUNNING`. It never starts, installs, or
+restarts anything, and it always exits promptly.
+
+Report exactly what it printed. Never infer "running" from a file, a process
+list, or a previous answer.
+
+### 2. Daemon Details, Active Character, Sessions
+
+Read these files with your file tools — no shell required, and the JSON stays
+JSON:
+
+| File (in the state directory) | Tells you |
+|---|---|
+| `daemon.json` | daemon PID and start time |
+| `config.json` | active character id, name, model URLs |
+| `state.json` | tracked sessions |
+
+If `config.json` is missing, the default character (Beatriz) is active.
+If `daemon.json` is missing or stale, rely on the `status` answer, not on it.
 
 ### 3. Cached Characters
 
-```bash
-ls -d ~/.varie-claude-avatar/characters/*/ 2>/dev/null | xargs -I{} basename {}
-```
-
-### 4. Active Sessions
-
-```bash
-cat ~/.varie-claude-avatar/state.json 2>/dev/null
-```
+List the directories under `characters/` inside the state directory with your
+file tools. Each directory name is a cached character id.
 
 ## Output Format
-
-Present as:
 
 ```
 ## Varie Claude Avatar Status
 
-**Daemon**: Running (PID 12345) / Not Running
+**Daemon**: RUNNING (PID 12345) / NOT_RUNNING
+**Platform**: Windows x64 / macOS
 **Active Character**: Soren (`soren_cb3333dd3e3f`) / Beatriz (default)
 **Profile**: https://varie.ai/varie-mate/characters/{activeCharacterId}
 **Cached Characters**: soren_cb3333dd3e3f, beatriz_4e17b3271c2b
@@ -56,4 +75,18 @@ Present as:
 - Create your own: https://varie.ai/varie-mate
 ```
 
-If the daemon is not running, suggest: `cd varie-claude-avatar/daemon && npm run dev`
+The PID line is only valid if `daemon.json` exists **and** the probe said
+`RUNNING`; otherwise report `NOT_RUNNING` without a PID.
+
+## If the Daemon Is Not Running
+
+Suggest, in order:
+
+1. `/varie-avatar:install` — installs it if missing, or reports what failed.
+2. Start the installed app directly:
+   - macOS: `open -g -j "$HOME/Applications/Varie Claude Avatar.app"`
+   - Windows PowerShell: `Start-Process "$env:LOCALAPPDATA\Programs\Varie Claude Avatar\Varie Claude Avatar.exe"`
+3. Start a new Claude Code session — the SessionStart hook launches the daemon.
+
+From a source checkout, `npm run dev` inside `daemon/` also works on both
+platforms.

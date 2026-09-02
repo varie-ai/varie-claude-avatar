@@ -5,7 +5,39 @@ const os = require('node:os');
 const { getIpcEndpoint } = require('../../shared/ipc-endpoint.cjs');
 const { parseHookInput, buildEvent, MAX_STDIN_BYTES } = require('./lib/event.cjs');
 const { sendEvent } = require('./lib/transport.cjs');
-const { ensureDaemon: ensureDaemonLifecycle } = require('./lib/daemon-lifecycle.cjs');
+const {
+  ensureDaemon: ensureDaemonLifecycle,
+  probeEndpoint,
+} = require('./lib/daemon-lifecycle.cjs');
+
+/**
+ * Sub-commands that are not hook events.
+ *
+ * They exist for the plugin skills, which need a real answer rather than a
+ * fire-and-forget event: hooks.json never invokes them. Neither reads stdin and
+ * neither starts or installs anything.
+ */
+const COMMANDS = new Set(['status', 'reload-character']);
+
+// A person is waiting for `status`, so it can afford more than the 250 ms a
+// hook allows -- but it stays bounded: the skill waits for this process to exit.
+const STATUS_PROBE_TIMEOUT_MS = 750;
+
+// The exact tokens the sub-commands print. A skill branches on these, so they
+// are part of the contract and must stay stable.
+const STATUS_TOKENS = Object.freeze({ RUNNING: 'RUNNING', NOT_RUNNING: 'NOT_RUNNING' });
+const RELOAD_TOKENS = Object.freeze({
+  SENT: 'RELOAD_SENT',
+  FAILED: 'RELOAD_FAILED',
+  MISSING_ID: 'MISSING_CHARACTER_ID',
+});
+
+// Long option names, mapped to the field each one fills.
+const NAMED_OPTIONS = Object.freeze({
+  tool: 'tool',
+  message: 'message',
+  'character-id': 'characterId',
+});
 
 /**
  * Appends a diagnostic line to the local hook log.
@@ -24,6 +56,16 @@ function logWarning(message) {
   }
 }
 
+/**
+ * Writes one contract token on stdout.
+ *
+ * Sub-commands print exactly one line and nothing else, so a skill can read the
+ * answer without parsing prose.
+ */
+function defaultPrint(text) {
+  process.stdout.write(`${text}\n`);
+}
+
 /** Reduces any thrown value to a short, payload-free identifier. */
 function errorCode(error) {
   if (!error) return 'unknown';
@@ -31,13 +73,23 @@ function errorCode(error) {
 }
 
 /**
- * Parses the hook argument vector.
+ * Parses the argument vector.
+ *
+ * The first positional argument is either a sub-command (`command` names it) or
+ * a hook event name; `command` is 'event' for every hook invocation.
  *
  * `--tool` and `--message` remain supported because the deprecated Bash
  * wrappers still forward them; hooks.json passes neither.
  */
 function parseArgs(argv = []) {
-  const options = { eventName: 'unknown', ensure: false, tool: undefined, message: undefined };
+  const options = {
+    command: 'event',
+    eventName: 'unknown',
+    ensure: false,
+    tool: undefined,
+    message: undefined,
+    characterId: undefined,
+  };
   let sawEventName = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -49,12 +101,23 @@ function parseArgs(argv = []) {
       continue;
     }
 
-    const named = /^--(tool|message)(?:=(.*))?$/.exec(arg);
+    const named = /^--(tool|message|character-id)(?:=(.*))?$/.exec(arg);
     if (named) {
+      const field = NAMED_OPTIONS[named[1]];
       if (named[2] !== undefined) {
-        options[named[1]] = named[2];
-      } else if (typeof argv[index + 1] === 'string') {
-        options[named[1]] = argv[index + 1];
+        options[field] = named[2];
+        continue;
+      }
+
+      const next = argv[index + 1];
+      // A flag where the character ID should be means the ID was omitted:
+      // reload-character must refuse rather than transport a nonsense value and
+      // silently swallow the flag. The deprecated --tool/--message wrappers keep
+      // their original, more permissive behaviour.
+      const consumable = typeof next === 'string'
+        && (field !== 'characterId' || !next.startsWith('--'));
+      if (consumable) {
+        options[field] = next;
         index += 1;
       }
       continue;
@@ -63,6 +126,7 @@ function parseArgs(argv = []) {
     if (!sawEventName && !arg.startsWith('-')) {
       options.eventName = arg;
       sawEventName = true;
+      if (COMMANDS.has(arg)) options.command = arg;
     }
   }
 
@@ -127,6 +191,92 @@ async function ensureDaemon(info = {}) {
   return ensureDaemonLifecycle(info);
 }
 
+/**
+ * Boundary for the daemon liveness probe.
+ *
+ * `status` routes through this seam, which opens one short-lived connection to
+ * the shared endpoint and releases it. It never launches, installs or writes
+ * anything, and it never throws.
+ */
+async function probeDaemon(endpoint, options = {}) {
+  return probeEndpoint(endpoint, options);
+}
+
+/**
+ * `status` sub-command.
+ *
+ * Answers whether the daemon is listening on this user's endpoint, using the
+ * same bounded probe the lifecycle uses. It reads no stdin, starts nothing,
+ * sends no event, and prints exactly one token.
+ */
+async function runStatus(deps = {}) {
+  const endpointFn = deps.getIpcEndpoint ?? getIpcEndpoint;
+  const probe = deps.probeDaemon ?? probeDaemon;
+  const print = deps.print ?? defaultPrint;
+  const log = deps.log ?? logWarning;
+  const timeoutMs = deps.probeTimeoutMs ?? STATUS_PROBE_TIMEOUT_MS;
+
+  let running = false;
+  try {
+    running = await probe(endpointFn(), { timeoutMs });
+  } catch (error) {
+    // An unreachable daemon and a broken probe are the same answer for a user.
+    log(`Status probe failed (${errorCode(error)})`);
+    running = false;
+  }
+
+  print(running ? STATUS_TOKENS.RUNNING : STATUS_TOKENS.NOT_RUNNING);
+  return { command: 'status', running, delivered: false, rejected: false };
+}
+
+/**
+ * `reload-character --character-id <id>` sub-command.
+ *
+ * Sends one `reload_character` event carrying the identifier in
+ * `metadata.characterId`, which is what the daemon reads. The identifier is
+ * transported as data inside a JSON event: it is never interpolated into a
+ * command line, a shell or a log message.
+ *
+ * An empty identifier is refused before anything is opened -- the daemon would
+ * silently fall back to the already active character, which is not what the
+ * caller asked for. Surrounding whitespace is trimmed because it can only come
+ * from a quoting accident; the daemon compares identifiers literally.
+ */
+async function runReloadCharacter(options = {}, deps = {}) {
+  const endpointFn = deps.getIpcEndpoint ?? getIpcEndpoint;
+  const buildFn = deps.buildEvent ?? buildEvent;
+  const sendFn = deps.sendEvent ?? sendEvent;
+  const print = deps.print ?? defaultPrint;
+  const log = deps.log ?? logWarning;
+
+  const characterId = typeof options.characterId === 'string' ? options.characterId.trim() : '';
+
+  if (!characterId) {
+    log('Refused reload-character without a character id');
+    print(RELOAD_TOKENS.MISSING_ID);
+    return {
+      command: 'reload-character',
+      delivered: false,
+      rejected: true,
+      reason: 'missing_character_id',
+    };
+  }
+
+  const event = buildFn('reload-character', {}, deps.context ?? {});
+  event.metadata = { ...event.metadata, characterId };
+
+  try {
+    await sendFn(endpointFn(), event);
+  } catch (error) {
+    log(`Failed to deliver reload_character (${errorCode(error)})`);
+    print(RELOAD_TOKENS.FAILED);
+    return { command: 'reload-character', delivered: false, rejected: false };
+  }
+
+  print(RELOAD_TOKENS.SENT);
+  return { command: 'reload-character', delivered: true, rejected: false };
+}
+
 /** Applies the wrapper fallbacks; values coming from stdin always win. */
 function applyArgumentFallbacks(hookInput, options) {
   const input = { ...hookInput };
@@ -156,6 +306,18 @@ async function main(deps = {}) {
   const setExitCode = deps.setExitCode ?? ((code) => { process.exitCode = code; });
 
   const options = parseArgs(argv);
+
+  // Sub-commands answer a question; they never read stdin, so an inherited
+  // pipe that is never closed cannot make them hang.
+  if (options.command !== 'event') {
+    try {
+      return options.command === 'status'
+        ? await runStatus(deps)
+        : await runReloadCharacter(options, deps);
+    } finally {
+      setExitCode(0);
+    }
+  }
 
   try {
     const stdinResult = await readStdinFn(deps);
@@ -197,8 +359,15 @@ if (require.main === module) {
 }
 
 module.exports = {
+  COMMANDS,
+  STATUS_PROBE_TIMEOUT_MS,
+  STATUS_TOKENS,
+  RELOAD_TOKENS,
   parseArgs,
   readStdin,
   ensureDaemon,
+  probeDaemon,
+  runStatus,
+  runReloadCharacter,
   main,
 };
