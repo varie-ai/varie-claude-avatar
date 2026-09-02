@@ -449,6 +449,15 @@ test('a response aborted before end is not treated as a complete download', asyn
   assert.equal(sink.destroyed, true);
 });
 
+/**
+ * A lock file carries `<pid>:<identity>`: the pid drives stale detection, the
+ * identity makes an acquisition unique beyond the pid.
+ */
+function assertLockOwnedBy(lockPath, pid, message) {
+  const raw = fs.readFileSync(lockPath, 'utf8');
+  assert.match(raw, new RegExp(`^${pid}:[0-9a-f]{8,}$`), message ?? `lock must be owned by ${pid}`);
+}
+
 // --- acquireLock ------------------------------------------------------------
 
 test('the lock is atomic: a live holder blocks a second installation', () => {
@@ -457,7 +466,7 @@ test('the lock is atomic: a live holder blocks a second installation', () => {
 
   try {
     const first = acquireLock(lockPath, { pid: 4242, isProcessAlive: () => true });
-    assert.equal(fs.readFileSync(lockPath, 'utf8'), '4242');
+    assertLockOwnedBy(lockPath, 4242);
 
     assert.throws(
       () => acquireLock(lockPath, { pid: 9999, isProcessAlive: () => true }),
@@ -481,7 +490,7 @@ test('a stale lock left by a dead process is recovered', () => {
     fs.writeFileSync(lockPath, '123456');
     const lock = acquireLock(lockPath, { pid: 77, isProcessAlive: () => false });
 
-    assert.equal(fs.readFileSync(lockPath, 'utf8'), '77', 'the new owner must take over');
+    assertLockOwnedBy(lockPath, 77, 'the new owner must take over');
     assert.deepEqual(fs.readdirSync(dir), ['.installing'], 'no quarantine file may survive');
     lock.release();
   } finally {
@@ -500,7 +509,7 @@ test('a lock holding garbage is treated as stale', () => {
       isProcessAlive: () => { throw new Error('must not be consulted for garbage'); },
     });
 
-    assert.equal(fs.readFileSync(lockPath, 'utf8'), '88');
+    assertLockOwnedBy(lockPath, 88);
     lock.release();
   } finally {
     removeTempDir(dir);
@@ -540,7 +549,7 @@ test('two competitors meeting the same stale lock: the loser never deletes the w
     );
 
     assert.ok(winner, 'the winner must have acquired the lock');
-    assert.equal(fs.readFileSync(lockPath, 'utf8'), '222', 'the winner lock must survive untouched');
+    assertLockOwnedBy(lockPath, 222, 'the winner lock must survive untouched');
     assert.deepEqual(fs.readdirSync(dir), ['.installing'], 'no quarantine file may survive');
 
     winner.release();
@@ -862,4 +871,138 @@ test('the install-daemon shell entry point is only a wrapper around the Node ins
   for (const legacy of ['curl', 'unzip', 'mktemp', 'OSTYPE', 'browser_download_url', 'LOCK_FILE']) {
     assert.ok(!wrapper.includes(legacy), `the wrapper must no longer implement ${legacy}`);
   }
+});
+
+// --- release() ownership safety ---------------------------------------------
+
+/**
+ * Substitutes the lock file exactly at the destructive step of release().
+ *
+ * The hook fires on the first rename or unlink of the lock path, which is the
+ * moment a competing process could realistically slip in. No timing, no extra
+ * process: the interleaving is deterministic.
+ */
+function makeSubstitutingFs(lockPath, replacement) {
+  const proxy = Object.create(fs);
+  let substituted = false;
+
+  const substitute = () => {
+    if (substituted) return;
+    substituted = true;
+    fs.writeFileSync(lockPath, replacement);
+  };
+
+  proxy.renameSync = (from, to) => {
+    if (from === lockPath) substitute();
+    return fs.renameSync(from, to);
+  };
+  proxy.unlinkSync = (target) => {
+    if (target === lockPath) substitute();
+    return fs.unlinkSync(target);
+  };
+
+  return proxy;
+}
+
+test('release() leaves a lock replaced by another acquisition of the same process', () => {
+  const dir = makeTempDir('vca-lock-');
+  const lockPath = path.join(dir, '.installing');
+  // Same pid, different acquisition: a pid comparison alone cannot tell these
+  // apart, so the identity has to be more than the pid.
+  const foreign = '4242:00000000000000000000beef';
+
+  try {
+    const racingFs = makeSubstitutingFs(lockPath, foreign);
+    const lock = acquireLock(lockPath, { fs: racingFs, pid: 4242, isProcessAlive: () => false });
+
+    lock.release();
+
+    assert.equal(fs.existsSync(lockPath), true, 'the replacing lock must survive release()');
+    assert.equal(fs.readFileSync(lockPath, 'utf8'), foreign, 'it must not be overwritten either');
+    assert.deepEqual(fs.readdirSync(dir), ['.installing'], 'no claim file may survive');
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test('release() never deletes a lock whose content it does not recognise', () => {
+  const dir = makeTempDir('vca-lock-');
+  const lockPath = path.join(dir, '.installing');
+
+  try {
+    const racingFs = makeSubstitutingFs(lockPath, 'foreign-garbage');
+    const lock = acquireLock(lockPath, { fs: racingFs, pid: 4242, isProcessAlive: () => false });
+
+    lock.release();
+
+    assert.equal(fs.existsSync(lockPath), true, 'an unknown lock must stay available to its owner');
+    assert.equal(fs.readFileSync(lockPath, 'utf8'), 'foreign-garbage');
+    assert.deepEqual(fs.readdirSync(dir), ['.installing'], 'no claim file may survive');
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test('release() removes its own lock and is safe to call when it is already gone', () => {
+  const dir = makeTempDir('vca-lock-');
+  const lockPath = path.join(dir, '.installing');
+
+  try {
+    const lock = acquireLock(lockPath, { pid: 4242, isProcessAlive: () => false });
+    assertLockOwnedBy(lockPath, 4242);
+
+    lock.release();
+    assert.equal(fs.existsSync(lockPath), false, 'its own lock must be removed');
+
+    assert.doesNotThrow(() => lock.release(), 'a second release must be inert');
+    assert.deepEqual(fs.readdirSync(dir), []);
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test('two acquisitions of the same process get distinct identities', () => {
+  const dir = makeTempDir('vca-lock-');
+  const lockPath = path.join(dir, '.installing');
+
+  try {
+    const first = acquireLock(lockPath, { pid: 4242, isProcessAlive: () => false });
+    const firstRaw = fs.readFileSync(lockPath, 'utf8');
+    first.release();
+
+    const second = acquireLock(lockPath, { pid: 4242, isProcessAlive: () => false });
+    const secondRaw = fs.readFileSync(lockPath, 'utf8');
+    second.release();
+
+    assert.notEqual(firstRaw, secondRaw, 'the identity must not be the pid alone');
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+// --- synchronous sink creation failure --------------------------------------
+
+test('a synchronous createWriteStream failure destroys the response and rejects', async () => {
+  let response = null;
+  const { httpGet } = makeHttpGet({
+    'https://github.com/a': {
+      stream: () => {
+        response = bodyStream(['payload-bytes']);
+        return response;
+      },
+    },
+  });
+
+  const failure = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+
+  await assert.rejects(
+    downloadAsset('https://github.com/a', 'ignored', {
+      httpGet,
+      createWriteStream: () => { throw failure; },
+    }),
+    (error) => error === failure,
+  );
+
+  assert.ok(response, 'the response must have been opened');
+  assert.equal(response.destroyed, true, 'the already open response must be destroyed');
 });

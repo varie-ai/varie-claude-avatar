@@ -256,9 +256,12 @@ async function downloadAsset(url, destPath, deps = {}) {
     },
   });
 
-  const sink = createWriteStream(destPath);
+  // Created inside the guarded block: a synchronous failure here must destroy
+  // the response that is already open.
+  let sink = null;
 
   try {
+    sink = createWriteStream(destPath);
     await pipeline(response, counter, sink);
   } catch (error) {
     destroyQuietly(response);
@@ -329,6 +332,13 @@ function readLockRaw(fsModule, lockPath) {
   }
 }
 
+/**
+ * Reads the owning pid out of a lock body.
+ *
+ * A lock reads `<pid>:<token>`; the leading integer is all staleness detection
+ * needs, and a plain `<pid>` written by an older version still parses. Anything
+ * else is unknown content and yields null.
+ */
 function parseLockOwner(raw) {
   if (raw === null) return null;
   const pid = Number.parseInt(String(raw).trim(), 10);
@@ -343,12 +353,18 @@ function parseLockOwner(raw) {
  * before being deleted. Losing that rename, or finding different content behind
  * it, means another process got there first, so the lock is re-evaluated and
  * never deleted.
+ *
+ * Each acquisition writes `<pid>:<token>`. The token makes the acquisition
+ * unique beyond the pid, so the same process reacquiring the lock produces a
+ * different identity and release() can tell the two apart.
  */
 function acquireLock(lockPath, deps = {}) {
   const fsModule = deps.fs ?? fs;
   const pid = deps.pid ?? process.pid;
   const isProcessAlive = deps.isProcessAlive ?? defaultIsProcessAlive;
   const uniqueSuffix = deps.uniqueSuffix ?? (() => crypto.randomBytes(6).toString('hex'));
+  const identityToken = deps.identityToken ?? (() => crypto.randomBytes(12).toString('hex'));
+  const identity = `${pid}:${identityToken()}`;
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     let fd;
@@ -392,19 +408,62 @@ function acquireLock(lockPath, deps = {}) {
     }
 
     try {
-      fsModule.writeSync(fd, String(pid));
+      fsModule.writeSync(fd, identity);
     } finally {
       fsModule.closeSync(fd);
     }
 
     return {
       pid,
+      identity,
+
+      /**
+       * Releases the lock without ever destroying somebody else's.
+       *
+       * Reading the path and then unlinking it is not atomic: the lock can be
+       * replaced in between, and the unlink would delete the replacement. So
+       * the lock is first claimed with a rename — atomic on POSIX and Windows —
+       * and only then inspected. A body that is not exactly this acquisition's
+       * identity is handed back with a hard link, which fails instead of
+       * overwriting when the owner already recreated its lock.
+       */
       release() {
+        const claimPath = `${lockPath}.release-${uniqueSuffix()}`;
+
         try {
-          // Never remove a lock that now belongs to somebody else.
-          const currentOwner = parseLockOwner(readLockRaw(fsModule, lockPath));
-          if (currentOwner !== null && currentOwner !== pid) return;
-          fsModule.unlinkSync(lockPath);
+          fsModule.renameSync(lockPath, claimPath);
+        } catch {
+          // Nothing at the path, or it is not ours to move: leave it alone.
+          return;
+        }
+
+        if (readLockRaw(fsModule, claimPath) === identity) {
+          try {
+            fsModule.unlinkSync(claimPath);
+          } catch {
+            // Already gone.
+          }
+          return;
+        }
+
+        // Foreign or replaced lock: restore it, never delete or overwrite it.
+        try {
+          fsModule.linkSync(claimPath, lockPath);
+        } catch (error) {
+          if (!error || error.code !== 'EEXIST') {
+            // Filesystem without hard links: best-effort restore.
+            try {
+              fsModule.renameSync(claimPath, lockPath);
+              return;
+            } catch {
+              return;
+            }
+          }
+          // EEXIST: the owner already recreated its lock, ours is obsolete.
+        }
+
+        try {
+          fsModule.unlinkSync(claimPath);
         } catch {
           // Already gone.
         }
