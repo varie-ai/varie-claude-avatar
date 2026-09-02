@@ -340,9 +340,37 @@ function createWindow(): void {
   log('INFO', 'Window setup complete');
 }
 
+/**
+ * Locates the Windows tray icon inside the app bundle.
+ *
+ * Resolution is anchored to the app directory, never to process.cwd(), so it
+ * works both from a source checkout and from the packaged app (where the file
+ * lives inside app.asar).
+ */
+function resolveWindowsTrayIconPath(): string {
+  const candidates = [
+    path.join(app.getAppPath(), 'assets', 'icon.ico'),
+    path.join(__dirname, '..', '..', 'assets', 'icon.ico'),
+    path.join(process.resourcesPath || '', 'assets', 'icon.ico'),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // Unreadable candidate: keep looking.
+    }
+  }
+
+  return candidates[0];
+}
+
 function createTray(): void {
-  // Create a simple tray icon (16x16 template image for macOS)
-  const icon = nativeImage.createEmpty();
+  // Windows needs a real multi-resolution icon; macOS keeps its existing
+  // template image behaviour unchanged.
+  const icon = process.platform === 'win32'
+    ? nativeImage.createFromPath(resolveWindowsTrayIconPath())
+    : nativeImage.createEmpty();
   tray = new Tray(icon);
 
   const contextMenu = Menu.buildFromTemplate([
