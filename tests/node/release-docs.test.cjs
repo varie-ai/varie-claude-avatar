@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const cli = require('../../plugin/scripts/varie-avatar-hook.cjs');
 const { buildEvent } = require('../../plugin/scripts/lib/event.cjs');
@@ -20,13 +22,168 @@ const ADAPTER_PATH = path.join(
   REPO_ROOT, 'daemon', 'src', 'main', 'terminal-actions', 'create-terminal-actions.ts',
 );
 
-const SKILL_PATHS = {
-  install: path.join(REPO_ROOT, 'plugin', 'skills', 'install', 'SKILL.md'),
-  status: path.join(REPO_ROOT, 'plugin', 'skills', 'status', 'SKILL.md'),
-  set: path.join(REPO_ROOT, 'plugin', 'skills', 'set', 'SKILL.md'),
-};
+const SKILLS_ROOT = path.join(REPO_ROOT, 'plugin', 'skills');
 
 const read = (file) => fs.readFileSync(file, 'utf8');
+
+/**
+ * Every skill the plugin publishes.
+ *
+ * plugin.json does not enumerate skills -- Claude Code discovers them by
+ * convention from <plugin>/skills/<name>/SKILL.md -- so the filesystem is the
+ * only source of truth for "which skills ship". Reading it here, instead of
+ * listing names, is what makes the general checks below cover a skill added
+ * tomorrow by someone who never opens this file.
+ */
+function discoverSkills(root = SKILLS_ROOT) {
+  return fs.readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({ name: entry.name, file: path.join(root, entry.name, 'SKILL.md') }))
+    .filter((skill) => fs.existsSync(skill.file))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+const PUBLISHED_SKILLS = discoverSkills();
+
+/**
+ * The skills that drive the daemon.
+ *
+ * Only these have to document the installed path, the status probe and the
+ * reload tokens. `list` only queries a public web API, and holding it to those
+ * requirements would be noise, not portability -- but it is still bound by
+ * every general check.
+ */
+const OPERATIONAL_SKILLS = ['install', 'status', 'set'];
+
+function skillFile(name) {
+  const skill = PUBLISHED_SKILLS.find((candidate) => candidate.name === name);
+  assert.ok(skill, `skills/${name} must exist`);
+  return skill.file;
+}
+
+/**
+ * Every executable construct in a Markdown document: the body of each fenced
+ * block whatever its info string, plus each inline code span.
+ *
+ * Scoping the portability rules to these, rather than to the whole text, keeps
+ * a sentence that merely names a tool from being read as an instruction, while
+ * still catching a command hidden in a ```text or ```console fence or tucked
+ * into an inline span.
+ */
+function codeConstructs(markdown) {
+  const constructs = [];
+  const lines = markdown.split('\n');
+
+  let fence = null;
+  for (const line of lines) {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (marker) {
+      if (fence === null) {
+        fence = { marker: marker[1][0], body: [] };
+        continue;
+      }
+      if (marker[1][0] === fence.marker) {
+        constructs.push(fence.body.join('\n'));
+        fence = null;
+        continue;
+      }
+    }
+    if (fence !== null) {
+      fence.body.push(line);
+      continue;
+    }
+    for (const span of line.matchAll(/`([^`]+)`/g)) constructs.push(span[1]);
+  }
+
+  if (fence !== null) constructs.push(fence.body.join('\n'));
+  return constructs;
+}
+
+/**
+ * Lines whose first token is a command, with decoration stripped.
+ *
+ * An indented code block, a blockquote, an HTML <pre> body and a "$ " prompt
+ * all reduce to the same thing here, so a non-portable command cannot hide by
+ * choosing a wrapper the fence scanner does not know about. A command named in
+ * the middle of a sentence is not a leading token and stays prose.
+ */
+function leadingCommandLines(markdown) {
+  return markdown.split('\n')
+    .map((line) => line
+      .replace(/^[\s>]*/, '')
+      .replace(/^<\/?(?:pre|code|samp|kbd)[^>]*>/i, '')
+      .replace(/^\$\s+/, ''))
+    .filter((line) => /^[a-z][a-z0-9._-]*\s+\S/.test(line));
+}
+
+/** Everything in a document that reads as an instruction. */
+function instructionCandidates(markdown) {
+  return [...codeConstructs(markdown), ...leadingCommandLines(markdown)];
+}
+
+/**
+ * Command shapes with no correct reading on both supported platforms.
+ *
+ * `curl` is the sharp one. In Windows PowerShell 5.1 -- the shell that ships
+ * with Windows 10 1809, the oldest release this project supports -- `curl` is
+ * an alias for Invoke-WebRequest, whose parameters are entirely different:
+ * `-s` is not "silent" but an ambiguous prefix, so the command dies at
+ * parameter binding instead of fetching anything. The project already requires
+ * Node 18+ on every platform, so a portable replacement always exists and there
+ * is no reason for a skill to publish a curl command line at all.
+ */
+const NON_PORTABLE_COMMANDS = [
+  [/(^|[\s;&|(])curl\s+-/m, 'a curl command line'],
+  [/(^|[\s;&|(])wget\s/m, 'wget'],
+  // The same collision, generalised. Windows PowerShell 5.1 ships aliases with
+  // these POSIX names bound to cmdlets whose parameters are entirely different,
+  // so a POSIX short flag on any of them dies at parameter binding exactly the
+  // way `curl -s` does. Banning the shape, not the one name that was reported,
+  // is what stops the next instance.
+  [
+    /(^|[\s;&|(])(curl|wget|ls|cat|cp|mv|rm|ps|kill|sort|tee|diff|echo|sleep|head|tail|touch|which|man)\s+-[A-Za-z]/m,
+    'a POSIX short flag on a name PowerShell aliases to a different cmdlet',
+  ],
+  [/(^|[\s;&|(])nc\s+-/m, 'nc'],
+  [/\|\s*nc\b/, 'a pipe into nc'],
+  [/test\s+-[SefdLxr]\s/, 'a POSIX file test'],
+  [/echo\s+'?\{/, 'JSON built in a shell'],
+  [/(^|[\s;&|(])rm\s+-/m, 'rm'],
+  [/(^|[\s;&|(])mkdir\s+-p/m, 'mkdir -p'],
+  [/(^|[\s;&|(])cat\s+>/m, 'a shell heredoc'],
+  [/(^|[\s;&|(])ls\s+-d/m, 'ls -d'],
+  [/date\s+\+%s/, 'date +%s'],
+  [/(^|[\s;&|(])(grep|sed|awk|xargs|which)\s+-/m, 'a POSIX text utility'],
+];
+
+/** POSIX-only shell syntax: allowed, but only beside a PowerShell form. */
+const POSIX_ONLY_SYNTAX = [
+  [/\$\{[A-Za-z_][A-Za-z0-9_]*\}/, 'a ${VAR} expansion'],
+  [/\$HOME\b/, '$HOME'],
+  [/2>\/dev\/null/, '2>/dev/null'],
+];
+
+/** Non-portable command shapes found in a document's executable constructs. */
+function portabilityViolations(markdown) {
+  const found = new Set();
+  for (const construct of instructionCandidates(markdown)) {
+    for (const [pattern, label] of NON_PORTABLE_COMMANDS) {
+      if (pattern.test(construct)) found.add(label);
+    }
+  }
+  return [...found].sort();
+}
+
+/** POSIX-only syntax found in a document's executable constructs. */
+function posixOnlySyntax(markdown) {
+  const found = new Set();
+  for (const construct of instructionCandidates(markdown)) {
+    for (const [pattern, label] of POSIX_ONLY_SYNTAX) {
+      if (pattern.test(construct)) found.add(label);
+    }
+  }
+  return [...found].sort();
+}
 
 // ---------------------------------------------------------------------------
 // A parser for the YAML subset these workflows use.
@@ -566,7 +723,7 @@ function citedHookCommands(text) {
 
 test('every documented hook CLI invocation is a mode the CLI really has', () => {
   const documents = { README: read(README_PATH), ...Object.fromEntries(
-    Object.entries(SKILL_PATHS).map(([name, file]) => [`skills/${name}`, read(file)]),
+    PUBLISHED_SKILLS.map((skill) => [`skills/${skill.name}`, read(skill.file)]),
   ) };
 
   let total = 0;
@@ -609,7 +766,7 @@ test('reload-character is documented with the flag it actually parses', () => {
   assert.ok(DAEMON_EVENT_TYPES.has(built.type));
   assert.equal(built.type, 'reload_character');
 
-  for (const [label, file] of [['README', README_PATH], ['skills/set', SKILL_PATHS.set]]) {
+  for (const [label, file] of [['README', README_PATH], ['skills/set', skillFile('set')]]) {
     const text = read(file);
     if (!text.includes('reload-character')) continue;
     for (const line of text.split('\n').filter((candidate) => candidate.includes('reload-character'))) {
@@ -623,12 +780,12 @@ test('reload-character is documented with the flag it actually parses', () => {
 });
 
 test('the tokens the set skill tells the agent to branch on are the ones printed', () => {
-  const text = read(SKILL_PATHS.set);
+  const text = read(skillFile('set'));
   for (const token of Object.values(cli.RELOAD_TOKENS)) {
     assert.ok(text.includes(token), `the skill must document ${token}`);
   }
   for (const token of Object.values(cli.STATUS_TOKENS)) {
-    assert.ok(read(SKILL_PATHS.status).includes(token), `the status skill must document ${token}`);
+    assert.ok(read(skillFile('status')).includes(token), `the status skill must document ${token}`);
   }
 });
 
@@ -637,53 +794,82 @@ test('the installer entry point the skills document exists and takes --verbose',
   assert.ok(fs.existsSync(installer));
   assert.match(read(installer), /argv\.includes\('--verbose'\)/);
 
-  for (const [name, file] of Object.entries(SKILL_PATHS)) {
-    if (name !== 'install') continue;
-    const text = read(file);
-    assert.match(text, /scripts\/lib\/install-daemon\.cjs" --verbose/, 'POSIX form');
-    assert.match(text, /scripts\\lib\\install-daemon\.cjs" --verbose/, 'PowerShell form');
-  }
+  const text = read(skillFile('install'));
+  assert.match(text, /scripts\/lib\/install-daemon\.cjs" --verbose/, 'POSIX form');
+  assert.match(text, /scripts\\lib\\install-daemon\.cjs" --verbose/, 'PowerShell form');
 });
 
 // ---------------------------------------------------------------------------
 // Skills: no obsolete or non-portable instructions
 // ---------------------------------------------------------------------------
 
-test('no skill still tells the agent to poke the socket or hand-build JSON', () => {
-  const FORBIDDEN = [
-    [/(^|[\s;&|(])nc\s+-/m, 'nc'],
-    [/test\s+-[SefdL]\s/, 'a socket/file existence test'],
-    [/echo\s+'?\{/, 'JSON built in a shell'],
-    [/(^|[\s;&|(])rm\s+-/m, 'rm'],
-    [/(^|[\s;&|(])mkdir\s+-p/m, 'mkdir -p'],
-    [/(^|[\s;&|(])cat\s+>/m, 'a shell heredoc'],
-    [/(^|[\s;&|(])ls\s+-d/m, 'ls -d'],
-    [/date\s+\+%s/, 'date +%s'],
-    [/curl\s+-[a-zA-Z]/, 'a curl command line'],
-    [/\|\s*nc\b/, 'a pipe into nc'],
-  ];
+test('the published skills are discovered from the filesystem, not from a list here', (t) => {
+  const discovered = PUBLISHED_SKILLS.map((skill) => skill.name);
 
-  for (const [name, file] of Object.entries(SKILL_PATHS)) {
-    const text = read(file);
-    for (const [pattern, label] of FORBIDDEN) {
-      assert.ok(!pattern.test(text), `skills/${name} still uses ${label}`);
+  assert.ok(discovered.length > 0, 'the plugin must publish skills');
+  assert.ok(discovered.includes('list'), 'the character listing skill is a published skill');
+  for (const operational of OPERATIONAL_SKILLS) {
+    assert.ok(discovered.includes(operational), `skills/${operational} must still exist`);
+  }
+
+  // Cross-check against a different source -- the git index -- so a skill that
+  // exists only on disk, or one discovery silently skipped, is visible here.
+  let tracked;
+  try {
+    tracked = execFileSync('git', ['ls-files', 'plugin/skills'], { cwd: REPO_ROOT, encoding: 'utf8' });
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      t.skip('git is not available in this environment');
+      return;
     }
+    throw error;
+  }
+
+  const committed = [...new Set(
+    tracked.split('\n')
+      .map((line) => /^plugin\/skills\/([^/]+)\/SKILL\.md$/.exec(line.trim()))
+      .filter(Boolean)
+      .map((match) => match[1]),
+  )].sort();
+
+  assert.deepEqual(discovered, committed, 'every committed skill must be discovered, and vice versa');
+});
+
+test('no published skill publishes a command that only one shell can run', () => {
+  for (const skill of PUBLISHED_SKILLS) {
+    assert.deepEqual(
+      portabilityViolations(read(skill.file)),
+      [],
+      `skills/${skill.name} publishes a command that does not work on both platforms`,
+    );
   }
 });
 
-test('each skill gives a PowerShell form and never requires Bash on Windows', () => {
-  for (const [name, file] of Object.entries(SKILL_PATHS)) {
-    const text = read(file);
-    assert.match(text, /```powershell/, `skills/${name} must show the PowerShell form`);
-    assert.match(text, /\$env:/, `skills/${name} must expand variables the PowerShell way`);
+test('a skill that needs POSIX-only syntax also publishes the PowerShell form', () => {
+  for (const skill of PUBLISHED_SKILLS) {
+    const text = read(skill.file);
+    const posix = posixOnlySyntax(text);
+    if (posix.length === 0) continue;
+
     assert.match(
       text,
-      /%LOCALAPPDATA%\\|%USERPROFILE%\\/,
-      `skills/${name} must show where things live on Windows`,
+      /```powershell/,
+      `skills/${skill.name} uses ${posix.join(', ')} and must show the PowerShell form too`,
     );
+    assert.match(text, /\$env:/, `skills/${skill.name} must expand variables the PowerShell way`);
+  }
+});
+
+test('the operational skills carry the platform paths the others do not need', () => {
+  // Deliberately scoped: a skill that only calls a web API has no installed
+  // path to document, and demanding one would be noise rather than portability.
+  assert.ok(!OPERATIONAL_SKILLS.includes('list'), 'list drives no daemon');
+
+  for (const name of OPERATIONAL_SKILLS) {
+    const text = read(skillFile(name));
+    assert.match(text, /%LOCALAPPDATA%\\|%USERPROFILE%\\/, `skills/${name} must show the Windows paths`);
     assert.match(text, /~\/\.varie-claude-avatar|\/Applications/, `skills/${name} must keep the macOS paths`);
 
-    // The skills that talk about the application itself must name its location.
     if (name === 'install' || name === 'status') {
       assert.ok(
         text.includes('%LOCALAPPDATA%\\Programs\\Varie Claude Avatar'),
@@ -691,10 +877,75 @@ test('each skill gives a PowerShell form and never requires Bash on Windows', ()
       );
     }
   }
+
+  // The general checks still apply to every skill, including list.
+  const generallyChecked = PUBLISHED_SKILLS.map((skill) => skill.name);
+  for (const name of generallyChecked) {
+    assert.deepEqual(portabilityViolations(read(skillFile(name))), []);
+  }
+  assert.ok(
+    generallyChecked.length > OPERATIONAL_SKILLS.length,
+    'at least one non-operational skill must be covered by the general checks',
+  );
+});
+
+test('a brand new skill directory cannot escape the general checks', () => {
+  // The fixture lives outside the repository: the point is that discovery and
+  // the portability rules are driven by structure, so a directory whose name
+  // appears in no list here is still caught.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vca-skill-fixture-'));
+
+  try {
+    const name = 'zzz-never-listed-anywhere';
+    fs.mkdirSync(path.join(root, name));
+    fs.writeFileSync(
+      path.join(root, name, 'SKILL.md'),
+      [
+        '# Brand New Skill',
+        '',
+        'Fetch the catalogue:',
+        '',
+        '```console',
+        'curl -s "https://varie.ai/api/character-create/public/discover?limit=20"',
+        '```',
+        '',
+        'Then clean up with `rm -rf ~/.cache/varie`.',
+        '',
+        'Or, hidden in an indented block rather than a fence:',
+        '',
+        '    wget https://varie.ai/characters.json',
+        '',
+        'Or behind a prompt inside raw HTML:',
+        '',
+        '<pre>',
+        '$ ls -la ~/.varie-claude-avatar',
+        '</pre>',
+        '',
+      ].join('\n'),
+    );
+
+    // A directory with no SKILL.md is not a skill and must not be discovered.
+    fs.mkdirSync(path.join(root, 'not-a-skill'));
+
+    const discovered = discoverSkills(root);
+    assert.deepEqual(discovered.map((skill) => skill.name), [name], 'discovery is name-independent');
+    assert.ok(!OPERATIONAL_SKILLS.includes(name), 'the fixture is in no hardcoded list');
+
+    const violations = portabilityViolations(read(discovered[0].file));
+    assert.ok(violations.includes('a curl command line'), 'a curl line in a console fence is caught');
+    assert.ok(violations.includes('rm'), 'a command hidden in an inline span is caught too');
+    assert.ok(violations.includes('wget'), 'an indented code block is caught too');
+    assert.ok(
+      violations.includes('a POSIX short flag on a name PowerShell aliases to a different cmdlet'),
+      'a prompt inside raw HTML is caught too',
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('the status skill answers from the daemon, not from a file on disk', () => {
-  const text = read(SKILL_PATHS.status);
+  const text = read(skillFile('status'));
   assert.match(text, /varie-avatar-hook\.cjs" status/);
   assert.match(text, /RUNNING/);
   assert.match(text, /NOT_RUNNING/);
@@ -768,8 +1019,8 @@ test('Windows v1 limits are documented and match the adapter selection', () => {
   assert.match(adapter, /return new UnsupportedTerminalActions\(\);/);
 
   // No document may promise Windows terminal focus or approval.
-  for (const [label, file] of [['README', README_PATH], ...Object.entries(SKILL_PATHS).map(
-    ([name, skill]) => [`skills/${name}`, skill],
+  for (const [label, file] of [['README', README_PATH], ...PUBLISHED_SKILLS.map(
+    (skill) => [`skills/${skill.name}`, skill.file],
   )]) {
     const document = read(file);
     assert.ok(

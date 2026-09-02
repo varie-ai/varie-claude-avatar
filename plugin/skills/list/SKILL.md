@@ -12,10 +12,14 @@ If the user provided a preference (e.g., "I want a calm character", "something f
 
 ### Step 2: Fetch characters with pagination
 
-Fetch the first page:
+Fetch the first page with your web fetch tool, or with Node, which behaves
+identically in PowerShell and in a POSIX shell. Do not reach for `curl`: in
+Windows PowerShell it is an alias for `Invoke-WebRequest`, whose parameters are
+different, so a curl command line fails at parameter binding on the oldest
+supported target. Node 18 or newer is already a project requirement.
 
 ```bash
-curl -s "https://varie.ai/api/character-create/public/discover?limit=20"
+node -e "const [base,limit,cursor]=process.argv.slice(1);const url=new URL(base);url.searchParams.set('limit',limit);if(cursor)url.searchParams.set('cursor',cursor);fetch(url).then(r=>r.text()).then(t=>console.log(t))" "https://varie.ai/api/character-create/public/discover" 20
 ```
 
 The response shape:
@@ -45,11 +49,15 @@ The response shape:
 }
 ```
 
-**Pagination:** If `pagination.hasMore` is `true` and you haven't found a good match for the user's preference, fetch the next page:
+**Pagination:** If `pagination.hasMore` is `true` and you haven't found a good match for the user's preference, fetch the next page by passing `pagination.nextCursor` as one more argument:
 
 ```bash
-curl -s "https://varie.ai/api/character-create/public/discover?limit=20&cursor=<nextCursor>"
+node -e "const [base,limit,cursor]=process.argv.slice(1);const url=new URL(base);url.searchParams.set('limit',limit);if(cursor)url.searchParams.set('cursor',cursor);fetch(url).then(r=>r.text()).then(t=>console.log(t))" "https://varie.ai/api/character-create/public/discover" 20 "<nextCursor>"
 ```
+
+The cursor stays a separate argument and is encoded by `searchParams`, so a
+value containing `&`, `=`, `#` or a space cannot corrupt the query. Keep it
+quoted: PowerShell treats `<` and `>` as reserved characters outside quotes.
 
 Continue fetching pages until you find good matches or there are no more pages. Collect all fetched characters before presenting results.
 
