@@ -8,8 +8,10 @@ const APP_NAME = 'Varie Claude Avatar';
 const WINDOWS_EXECUTABLE = `${APP_NAME}.exe`;
 const MACOS_BUNDLE = `${APP_NAME}.app`;
 
-// The daemon must never make Claude Code wait: probe briefly, then give up.
-const LAUNCH_TIMEOUT_MS = 5000;
+// The daemon must never make Claude Code wait. The SessionStart hook has a
+// 5 s external timeout, so polling stops at 3500 ms and leaves at least 1.5 s
+// for sendEvent (900 ms budget) plus process startup.
+const LAUNCH_TIMEOUT_MS = 3500;
 const PROBE_INTERVAL_MS = 250;
 const PROBE_TIMEOUT_MS = 250;
 
@@ -103,6 +105,9 @@ async function waitForEndpoint(endpoint, options = {}) {
   const deadline = now() + timeoutMs;
 
   for (;;) {
+    // Never start a probe at or after the deadline: the budget is the budget.
+    if (now() >= deadline) return false;
+
     let answered = false;
     try {
       answered = await probe(endpoint);
@@ -168,11 +173,27 @@ function resolveLaunchTarget(options = {}) {
   return null;
 }
 
+/**
+ * Attaches an 'error' sink to a detached child.
+ *
+ * MUST be called immediately after spawn() and before unref(): a child that
+ * fails asynchronously emits 'error', and an 'error' without a listener is an
+ * uncaughtException that would take Claude Code's hook down with it.
+ */
+function guardChildErrors(child, onError) {
+  if (child && typeof child.on === 'function') {
+    child.on('error', (error) => onError(error));
+  }
+}
+
 /** Fire-and-forget installer: detached, silent, never awaited by a hook. */
 function startInstaller(deps = {}) {
   const spawn = deps.spawn ?? childProcess.spawn;
   const execPath = deps.execPath ?? process.execPath;
+  const log = deps.log ?? (() => {});
+
   const child = spawn(execPath, [INSTALLER_ENTRY], DETACHED_SPAWN_OPTIONS);
+  guardChildErrors(child, (error) => log(`installer process failed (${errorCode(error)})`));
   if (child && typeof child.unref === 'function') child.unref();
 }
 
@@ -204,14 +225,27 @@ async function ensureDaemon(options = {}) {
   if (target) {
     try {
       const child = spawn(target.command, target.args, DETACHED_SPAWN_OPTIONS);
+
+      let reportLaunchError;
+      const launchFailed = new Promise((resolve) => { reportLaunchError = resolve; });
+      guardChildErrors(child, (error) => reportLaunchError(error));
       if (child && typeof child.unref === 'function') child.unref();
-      await wait(endpoint);
-      return 'launched';
+
+      // Either the daemon answers within the budget, or the child reports an
+      // asynchronous launch failure first.
+      const launchError = await Promise.race([
+        Promise.resolve(wait(endpoint)).then(() => null),
+        launchFailed,
+      ]);
+
+      if (!launchError) return 'launched';
+      log(`daemon launch failed (${errorCode(launchError)})`);
     } catch (error) {
-      // The application exists but could not be started: fall through and let
-      // the installer repair the installation.
+      // Synchronous spawn failure.
       log(`daemon launch failed (${errorCode(error)})`);
     }
+    // The application exists but could not be started: fall through and let the
+    // installer repair the installation.
   }
 
   try {

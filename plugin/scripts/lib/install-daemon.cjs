@@ -1,8 +1,11 @@
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 const childProcess = require('node:child_process');
+const { Transform } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 
 const REPOSITORY = 'varie-ai/varie-claude-avatar';
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
@@ -11,14 +14,27 @@ const APP_NAME = 'Varie Claude Avatar';
 const WINDOWS_EXECUTABLE = `${APP_NAME}.exe`;
 const MACOS_BUNDLE = `${APP_NAME}.app`;
 
-// Downloads are accepted only from GitHub over HTTPS.
-const ALLOWED_HOSTS = new Set(['github.com', 'objects.githubusercontent.com', 'api.github.com']);
+// GitHub rejects requests without a User-Agent, and a real one makes the
+// traffic attributable.
+const USER_AGENT = 'varie-claude-avatar-installer (+https://github.com/varie-ai/varie-claude-avatar)';
+const GITHUB_API_ACCEPT = 'application/vnd.github+json';
+
+// Two separate allowlists: the release API and the asset CDN are different
+// trust domains, and neither may stand in for the other.
+const RELEASE_API_HOSTS = new Set(['api.github.com']);
+const DOWNLOAD_HOSTS = new Set(['github.com', 'objects.githubusercontent.com']);
+
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 60000;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 
 const STATE_DIR_NAME = '.varie-claude-avatar';
 const LOCK_FILE_NAME = '.installing';
+const INSTALL_LOG_NAME = 'install.log';
+
+// The asset name comes from an untrusted release document, so it never reaches
+// the filesystem: the download always lands on a fixed local name.
+const LOCAL_DOWNLOAD_NAME = { win32: 'installer.exe', darwin: 'app.zip' };
 
 /**
  * Windows asset naming contract.
@@ -52,28 +68,28 @@ function isPlainObject(value) {
 }
 
 /**
- * Parses a URL and accepts it only when it is plain HTTPS on a GitHub host,
- * with no credentials and no custom port.
+ * Parses a URL and accepts it only when it is plain HTTPS on one of the given
+ * hosts, with no credentials and no custom port.
  */
-function assertTrustedUrl(rawUrl) {
+function assertTrustedUrl(rawUrl, allowedHosts = DOWNLOAD_HOSTS) {
   let parsed;
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw installError('Asset URL is not a valid URL', 'E_UNTRUSTED_HOST');
+    throw installError('URL is not valid', 'E_UNTRUSTED_HOST');
   }
 
   if (parsed.protocol !== 'https:') {
-    throw installError('Asset URL must use HTTPS', 'E_UNTRUSTED_HOST');
+    throw installError('URL must use HTTPS', 'E_UNTRUSTED_HOST');
   }
   if (parsed.username || parsed.password) {
-    throw installError('Asset URL must not carry credentials', 'E_UNTRUSTED_HOST');
+    throw installError('URL must not carry credentials', 'E_UNTRUSTED_HOST');
   }
   if (parsed.port) {
-    throw installError('Asset URL must not use a custom port', 'E_UNTRUSTED_HOST');
+    throw installError('URL must not use a custom port', 'E_UNTRUSTED_HOST');
   }
-  if (!ALLOWED_HOSTS.has(parsed.hostname)) {
-    throw installError('Asset URL host is not a GitHub release host', 'E_UNTRUSTED_HOST');
+  if (!allowedHosts.has(parsed.hostname)) {
+    throw installError(`Host ${parsed.hostname} is not allowed for this request`, 'E_UNTRUSTED_HOST');
   }
 
   return parsed;
@@ -119,19 +135,23 @@ function selectReleaseAsset(release, platform, arch) {
     throw installError(`No installable asset for ${platform}/${arch}`, 'E_NO_ASSET');
   }
 
-  assertTrustedUrl(candidate.browser_download_url);
+  // An asset must be served from the download hosts, never from the API host.
+  assertTrustedUrl(candidate.browser_download_url, DOWNLOAD_HOSTS);
 
   return { name: candidate.name, url: candidate.browser_download_url };
 }
 
 /**
  * Issues a GET and follows at most MAX_REDIRECTS hops, re-validating the host
- * at every hop, and resolves with the final 200 response.
+ * against `allowedHosts` at every hop, and resolves with the final 200
+ * response. Every request carries an application User-Agent.
  */
 function openResponse(startUrl, deps = {}) {
   const httpGet = deps.httpGet ?? https.get;
+  const allowedHosts = deps.allowedHosts ?? DOWNLOAD_HOSTS;
   const maxRedirects = deps.maxRedirects ?? MAX_REDIRECTS;
   const timeoutMs = deps.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  const headers = { 'User-Agent': USER_AGENT, ...(deps.headers ?? {}) };
 
   return new Promise((resolve, reject) => {
     let redirects = 0;
@@ -151,7 +171,7 @@ function openResponse(startUrl, deps = {}) {
     const visit = (currentUrl) => {
       let parsed;
       try {
-        parsed = assertTrustedUrl(currentUrl);
+        parsed = assertTrustedUrl(currentUrl, allowedHosts);
       } catch (error) {
         fail(error);
         return;
@@ -159,7 +179,7 @@ function openResponse(startUrl, deps = {}) {
 
       let request;
       try {
-        request = httpGet(parsed.toString(), (response) => {
+        request = httpGet(parsed.toString(), { headers }, (response) => {
           const status = response.statusCode;
           const location = response.headers && response.headers.location;
 
@@ -209,55 +229,75 @@ function openResponse(startUrl, deps = {}) {
   });
 }
 
-/** Streams an asset to disk and refuses an empty payload. */
-async function downloadAsset(url, destPath, deps = {}) {
-  const createWriteStream = deps.createWriteStream ?? fs.createWriteStream;
-  const response = await openResponse(url, deps);
-
-  return new Promise((resolve, reject) => {
-    let bytes = 0;
-    let settled = false;
-
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    };
-
-    const sink = createWriteStream(destPath);
-    if (typeof sink.on === 'function') sink.on('error', fail);
-
-    response.on('error', fail);
-    response.on('data', (chunk) => {
-      bytes += chunk.length;
-      sink.write(chunk);
-    });
-    response.on('end', () => {
-      sink.end(() => {
-        if (settled) return;
-        if (bytes === 0) {
-          fail(installError('Downloaded asset was empty', 'E_EMPTY_DOWNLOAD'));
-          return;
-        }
-        settled = true;
-        resolve(bytes);
-      });
-    });
-  });
+function destroyQuietly(stream) {
+  try {
+    if (stream && typeof stream.destroy === 'function' && !stream.destroyed) stream.destroy();
+  } catch {
+    // best effort
+  }
 }
 
-/** Fetches the latest release document, bounded in size. */
+/**
+ * Streams an asset to disk.
+ *
+ * The transfer goes through stream pipeline, so backpressure is honoured and
+ * every stream is destroyed when any of them fails. A response that ends before
+ * the transfer completed is reported as incomplete, never as a good download.
+ */
+async function downloadAsset(url, destPath, deps = {}) {
+  const createWriteStream = deps.createWriteStream ?? fs.createWriteStream;
+  const response = await openResponse(url, { ...deps, allowedHosts: DOWNLOAD_HOSTS });
+
+  let bytes = 0;
+  const counter = new Transform({
+    transform(chunk, _encoding, callback) {
+      bytes += chunk.length;
+      callback(null, chunk);
+    },
+  });
+
+  const sink = createWriteStream(destPath);
+
+  try {
+    await pipeline(response, counter, sink);
+  } catch (error) {
+    destroyQuietly(response);
+    destroyQuietly(counter);
+    destroyQuietly(sink);
+    if (error && error.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+      throw installError('Download ended before the asset was complete', 'E_DOWNLOAD_INCOMPLETE');
+    }
+    throw error;
+  }
+
+  if (bytes === 0) {
+    throw installError('Downloaded asset was empty', 'E_EMPTY_DOWNLOAD');
+  }
+
+  return bytes;
+}
+
+/** Fetches the latest release document from the API host, bounded in size. */
 async function fetchLatestRelease(deps = {}) {
-  const response = await openResponse(deps.releaseUrl ?? RELEASE_API_URL, deps);
+  const response = await openResponse(deps.releaseUrl ?? RELEASE_API_URL, {
+    ...deps,
+    allowedHosts: RELEASE_API_HOSTS,
+    headers: { Accept: GITHUB_API_ACCEPT, ...(deps.headers ?? {}) },
+  });
 
   const body = await new Promise((resolve, reject) => {
     const chunks = [];
     let bytes = 0;
-    response.on('error', reject);
+    const fail = (error) => {
+      destroyQuietly(response);
+      reject(error);
+    };
+    response.on('error', fail);
+    response.on('aborted', () => fail(installError('Release request was aborted', 'E_DOWNLOAD_INCOMPLETE')));
     response.on('data', (chunk) => {
       bytes += chunk.length;
       if (bytes > MAX_JSON_BYTES) {
-        reject(installError('Release document is too large', 'E_RELEASE_TOO_LARGE'));
+        fail(installError('Release document is too large', 'E_RELEASE_TOO_LARGE'));
         return;
       }
       chunks.push(chunk);
@@ -281,43 +321,72 @@ function defaultIsProcessAlive(pid) {
   }
 }
 
-function readLockOwner(fsModule, lockPath) {
-  let raw;
+function readLockRaw(fsModule, lockPath) {
   try {
-    raw = fsModule.readFileSync(lockPath, 'utf8');
+    return fsModule.readFileSync(lockPath, 'utf8');
   } catch {
     return null;
   }
+}
+
+function parseLockOwner(raw) {
+  if (raw === null) return null;
   const pid = Number.parseInt(String(raw).trim(), 10);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
 /**
  * Creates the lock file with exclusive creation, so two hooks racing to
- * install cannot both win. A lock whose owner is gone (or unreadable) is
- * recovered exactly once.
+ * install cannot both win.
+ *
+ * A stale lock is claimed atomically: it is renamed to a unique quarantine path
+ * before being deleted. Losing that rename, or finding different content behind
+ * it, means another process got there first, so the lock is re-evaluated and
+ * never deleted.
  */
 function acquireLock(lockPath, deps = {}) {
   const fsModule = deps.fs ?? fs;
   const pid = deps.pid ?? process.pid;
   const isProcessAlive = deps.isProcessAlive ?? defaultIsProcessAlive;
+  const uniqueSuffix = deps.uniqueSuffix ?? (() => crypto.randomBytes(6).toString('hex'));
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     let fd;
     try {
       fd = fsModule.openSync(lockPath, 'wx');
     } catch (error) {
       if (!error || error.code !== 'EEXIST') throw error;
 
-      const owner = readLockOwner(fsModule, lockPath);
+      const raw = readLockRaw(fsModule, lockPath);
+      const owner = parseLockOwner(raw);
       if (owner !== null && isProcessAlive(owner)) {
         throw installError(`Installation already running (pid ${owner})`, 'E_LOCKED');
       }
 
+      const quarantine = `${lockPath}.stale-${pid}-${uniqueSuffix()}`;
       try {
-        fsModule.unlinkSync(lockPath);
+        fsModule.renameSync(lockPath, quarantine);
+      } catch (renameError) {
+        // Someone else claimed it first: re-evaluate, never delete.
+        if (renameError && renameError.code === 'ENOENT') continue;
+        throw renameError;
+      }
+
+      if (readLockRaw(fsModule, quarantine) !== raw) {
+        // A different lock appeared between the check and the claim; put it
+        // back and let the next attempt judge the new owner.
+        try {
+          fsModule.renameSync(quarantine, lockPath);
+        } catch {
+          // The owner already recreated it.
+        }
+        continue;
+      }
+
+      try {
+        fsModule.unlinkSync(quarantine);
       } catch {
-        // Another process recovered it first; the next attempt decides.
+        // best effort
       }
       continue;
     }
@@ -332,6 +401,9 @@ function acquireLock(lockPath, deps = {}) {
       pid,
       release() {
         try {
+          // Never remove a lock that now belongs to somebody else.
+          const currentOwner = parseLockOwner(readLockRaw(fsModule, lockPath));
+          if (currentOwner !== null && currentOwner !== pid) return;
           fsModule.unlinkSync(lockPath);
         } catch {
           // Already gone.
@@ -395,7 +467,13 @@ async function installDaemon(options = {}) {
     log(`installing ${release.tag_name} (${asset.name})`);
 
     tmpDir = fsModule.mkdtempSync(path.join(tmpdir, 'varie-avatar-'));
-    const downloadPath = path.join(tmpDir, asset.name);
+
+    // asset.name is untrusted input and is never used as a path component.
+    const localName = LOCAL_DOWNLOAD_NAME[platform];
+    if (!localName) {
+      throw installError(`Platform ${platform} is not supported`, 'E_UNSUPPORTED_PLATFORM');
+    }
+    const downloadPath = path.join(tmpDir, localName);
     await downloadAsset(asset.url, downloadPath, options);
 
     const installedPath = platform === 'win32'
@@ -445,29 +523,65 @@ async function runMacosInstaller(downloadPath, { homedir, spawn }) {
   return path.posix.join(installDir, MACOS_BUNDLE);
 }
 
-if (require.main === module) {
-  const logFile = path.join(os.homedir(), STATE_DIR_NAME, 'install.log');
-  const record = (message) => {
-    try {
-      fs.mkdirSync(path.dirname(logFile), { recursive: true });
-      fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${message}\n`);
-    } catch {
-      // Never throw from the logger.
-    }
+function defaultAppendLog(message) {
+  try {
+    const logDir = path.join(os.homedir(), STATE_DIR_NAME);
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, INSTALL_LOG_NAME), `[${new Date().toISOString()}] ${message}\n`);
+  } catch {
+    // Never throw from the logger.
+  }
+}
+
+/**
+ * Standalone entry point.
+ *
+ * `--verbose` mirrors the concise messages on stdout/stderr on top of the log,
+ * and a failure sets a non-zero exit code so a human or a script can see it.
+ * This never blocks Claude Code: the hook starts the installer detached and
+ * does not wait for its exit code.
+ */
+async function runCli(argv = [], deps = {}) {
+  const verbose = argv.includes('--verbose');
+  const stdout = deps.stdout ?? process.stdout;
+  const stderr = deps.stderr ?? process.stderr;
+  const appendLog = deps.appendLog ?? defaultAppendLog;
+  const install = deps.installDaemon ?? installDaemon;
+  const setExitCode = deps.setExitCode ?? ((code) => { process.exitCode = code; });
+
+  const log = (message) => {
+    appendLog(message);
+    if (verbose) stdout.write(`[varie-avatar] ${message}\n`);
   };
 
-  installDaemon({ log: record })
-    .catch((error) => record(`installation failed (${(error && error.code) || 'unknown'})`))
-    .finally(() => process.exit(0));
+  try {
+    const installedPath = await install({ ...(deps.installOptions ?? {}), log });
+    setExitCode(0);
+    return installedPath;
+  } catch (error) {
+    const code = (error && error.code) || 'unknown';
+    appendLog(`installation failed (${code})`);
+    if (verbose) stderr.write(`[varie-avatar] installation failed (${code})\n`);
+    setExitCode(1);
+    return null;
+  }
+}
+
+if (require.main === module) {
+  runCli(process.argv.slice(2)).finally(() => process.exit(process.exitCode ?? 0));
 }
 
 module.exports = {
   RELEASE_API_URL,
-  ALLOWED_HOSTS,
+  RELEASE_API_HOSTS,
+  DOWNLOAD_HOSTS,
+  USER_AGENT,
+  GITHUB_API_ACCEPT,
   MAX_REDIRECTS,
   APP_NAME,
   WINDOWS_EXECUTABLE,
   MACOS_BUNDLE,
+  LOCAL_DOWNLOAD_NAME,
   assertTrustedUrl,
   selectReleaseAsset,
   openResponse,
@@ -475,4 +589,5 @@ module.exports = {
   fetchLatestRelease,
   acquireLock,
   installDaemon,
+  runCli,
 };
