@@ -20,6 +20,16 @@ const MAX_ACK_BYTES = 4096;
 // payload is written, so retrying them cannot duplicate an event.
 const RETRYABLE_CONNECT_CODES = new Set(['ENOENT', 'ECONNREFUSED']);
 
+// The only daemon error codes this client is willing to surface. An
+// acknowledgement is untrusted input: anything outside this closed set becomes
+// E_SERVER_ERROR so a peer cannot inject text or newlines into an error or a log.
+const SAFE_DAEMON_CODES = new Set([
+  'invalid_json',
+  'invalid_event',
+  'message_too_large',
+  'internal_error',
+]);
+
 const DEFAULT_TIMERS = { setTimeout, clearTimeout };
 
 /**
@@ -122,8 +132,11 @@ function sendOnce(endpoint, event, options = {}) {
 
     socket.on('connect', () => {
       try {
-        socket.write(payload);
+        // Marked BEFORE the call: once write() is entered the daemon may
+        // already have received the payload, so even a synchronous transient
+        // failure must not be retried.
         wrotePayload = true;
+        socket.write(payload);
       } catch (error) {
         if (!error.code) error.code = 'E_WRITE';
         fail(error);
@@ -168,15 +181,24 @@ function sendOnce(endpoint, event, options = {}) {
         return;
       }
 
+      if (response.status !== 'error') {
+        fail(transportError('Acknowledgement carried an unrecognized status', 'E_ACK_MALFORMED'));
+        return;
+      }
+
       if (response.code === 'unsupported_protocol') {
         fail(transportError('Unsupported protocol version', 'E_PROTOCOL'));
         return;
       }
 
-      fail(transportError(
-        `Daemon rejected the event (${response.code || 'unknown'})`,
-        response.code || 'E_SERVER_ERROR',
-      ));
+      // Only a code from the closed set is echoed; it is one of our own
+      // literals, never the raw acknowledgement value.
+      if (typeof response.code === 'string' && SAFE_DAEMON_CODES.has(response.code)) {
+        fail(transportError(`Daemon rejected the event (${response.code})`, response.code));
+        return;
+      }
+
+      fail(transportError('Daemon rejected the event', 'E_SERVER_ERROR'));
     });
   });
 }

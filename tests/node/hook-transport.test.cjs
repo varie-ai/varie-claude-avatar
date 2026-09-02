@@ -551,3 +551,109 @@ test('a missing endpoint exhausts bounded retries in under one second', { timeou
   assert.ok(caught, 'Expected a rejection for a missing endpoint');
   assert.ok(elapsed < 1000, `Retry sequence must stay under 1s, took ${elapsed}ms`);
 });
+
+// --- Untrusted acknowledgements and the write boundary ---------------------
+
+test('an unknown acknowledgement code becomes E_SERVER_ERROR and is never echoed', { timeout: 5000 }, async () => {
+  const endpoint = getUniqueTestEndpoint();
+  const HOSTILE_CODE = 'not-a-real-code\nINJECTED-SECRET-LINE';
+  let connections = 0;
+
+  const server = net.createServer((socket) => {
+    connections += 1;
+    socket.on('data', () => socket.write(JSON.stringify({ status: 'error', code: HOSTILE_CODE }) + '\n'));
+    socket.on('error', () => {});
+  });
+
+  await listen(server, endpoint);
+
+  let caught = null;
+  try {
+    await sendEvent(endpoint, SAMPLE_EVENT, { attempts: 3, timeoutMs: 500, totalBudgetMs: 900 });
+  } catch (err) {
+    caught = err;
+  } finally {
+    await closeServer(server);
+  }
+
+  assert.ok(caught, 'Expected sendEvent to reject');
+  assert.equal(caught.code, 'E_SERVER_ERROR');
+  assert.ok(!caught.message.includes('INJECTED-SECRET-LINE'),
+    'the acknowledgement value must never reach the error message');
+  assert.ok(!caught.message.includes('not-a-real-code'),
+    'the acknowledgement value must never reach the error message');
+  assert.ok(!caught.message.includes('\n'), 'the error message must stay a single line');
+  assert.equal(connections, 1, 'an untrusted acknowledgement must not be retried');
+});
+
+test('the acknowledgement taxonomy is closed', { timeout: 20000 }, async () => {
+  const cases = [
+    [{ status: 'error', code: 'unsupported_protocol' }, 'E_PROTOCOL'],
+    [{ status: 'error', code: 'invalid_json' }, 'invalid_json'],
+    [{ status: 'error', code: 'invalid_event' }, 'invalid_event'],
+    [{ status: 'error', code: 'message_too_large' }, 'message_too_large'],
+    [{ status: 'error', code: 'internal_error' }, 'internal_error'],
+    [{ status: 'error' }, 'E_SERVER_ERROR'],
+    [{ status: 'error', code: 42 }, 'E_SERVER_ERROR'],
+    [{ status: 'error', code: { nested: true } }, 'E_SERVER_ERROR'],
+    [{ status: 'weird', code: 'invalid_event' }, 'E_ACK_MALFORMED'],
+    [{ code: 'invalid_event' }, 'E_ACK_MALFORMED'],
+  ];
+
+  for (const [ack, expectedCode] of cases) {
+    const endpoint = getUniqueTestEndpoint();
+    const server = net.createServer((socket) => {
+      socket.on('data', () => socket.write(JSON.stringify(ack) + '\n'));
+      socket.on('error', () => {});
+    });
+
+    await listen(server, endpoint);
+
+    let caught = null;
+    try {
+      await sendEvent(endpoint, SAMPLE_EVENT, { attempts: 3, timeoutMs: 500, totalBudgetMs: 900 });
+    } catch (err) {
+      caught = err;
+    } finally {
+      await closeServer(server);
+    }
+
+    const label = JSON.stringify(ack);
+    assert.ok(caught, `${label} must reject`);
+    assert.equal(caught.code, expectedCode, `${label} must map to ${expectedCode}`);
+  }
+});
+
+test('a synchronous write failure is never retried even with a transient code', async () => {
+  let attempts = 0;
+
+  const fakeNet = {
+    createConnection: () => {
+      attempts += 1;
+      const socket = createEmitterSocket();
+      socket.write = () => {
+        const error = new Error('write ENOENT');
+        error.code = 'ENOENT';
+        throw error;
+      };
+      setImmediate(() => socket.emit('connect'));
+      return socket;
+    },
+  };
+
+  let caught = null;
+  try {
+    await sendEvent('endpoint', SAMPLE_EVENT, {
+      attempts: 3,
+      netModule: fakeNet,
+      delay: () => Promise.resolve(),
+    });
+  } catch (err) {
+    caught = err;
+  }
+
+  assert.ok(caught, 'Expected sendEvent to reject');
+  assert.equal(caught.code, 'ENOENT');
+  assert.equal(caught.afterWrite, true, 'entering write() may already have started delivery');
+  assert.equal(attempts, 1, 'a possibly started delivery must never be resent');
+});
