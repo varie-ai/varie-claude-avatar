@@ -36,6 +36,7 @@ function buildTerminalActions() {
 
 const {
   createTerminalActionService,
+  createValidatedTerminalActionService,
   selectTerminalActionAdapter,
   registerTerminalActionIpc,
   MacOSTerminalActions,
@@ -386,4 +387,104 @@ test('the renderer keeps no terminal-action call to action in this release', () 
   walk(rendererDir);
 
   assert.deepEqual(offenders, [], 'Windows v1 ships no focus or approve call to action');
+});
+
+// --- result contract enforcement --------------------------------------------
+
+const CONTRACT_REASONS = ['unsupported', 'session_not_found', 'terminal_not_found', 'automation_denied'];
+
+/** Adapter that answers whatever it is told, so the boundary can be probed. */
+function makeAdapter(result) {
+  return {
+    capabilities: () => ({ focus: true, approve: true }),
+    perform: async () => result,
+  };
+}
+
+function serviceReturning(result) {
+  return createValidatedTerminalActionService(makeAdapter(result));
+}
+
+test('the four contract reasons survive the boundary unchanged', async () => {
+  for (const reason of CONTRACT_REASONS) {
+    const result = await serviceReturning({ ok: false, reason }).perform('focus', 's-1');
+    assert.deepEqual(result, { ok: false, reason }, `${reason} must be preserved`);
+  }
+});
+
+test('an unknown reason string is reduced to unsupported', async () => {
+  const offContract = [
+    'arbitrary_private_value',
+    'UNSUPPORTED',
+    'Session_Not_Found',
+    'session-not-found',
+    'focus',
+    '',
+    ' unsupported ',
+  ];
+
+  for (const reason of offContract) {
+    const result = await serviceReturning({ ok: false, reason }).perform('focus', 's-1');
+    assert.deepEqual(
+      result,
+      { ok: false, reason: 'unsupported' },
+      `${JSON.stringify(reason)} must not cross the boundary`,
+    );
+  }
+});
+
+test('a reason that is not a string is reduced to unsupported', async () => {
+  const nonStrings = [null, undefined, 0, 42, -1, 1n, true, false, {}, [], ['unsupported'], { reason: 'unsupported' }];
+
+  for (const reason of nonStrings) {
+    const result = await serviceReturning({ ok: false, reason }).perform('approve', 's-1');
+    assert.deepEqual(
+      result,
+      { ok: false, reason: 'unsupported' },
+      `${String(reason)} must not cross the boundary`,
+    );
+  }
+});
+
+test('a missing reason becomes unsupported', async () => {
+  const result = await serviceReturning({ ok: false }).perform('focus', 's-1');
+  assert.deepEqual(result, { ok: false, reason: 'unsupported' });
+});
+
+test('an adapter cannot smuggle extra properties across the boundary', async () => {
+  const marker = Symbol('adapter-private');
+  const result = await serviceReturning({
+    ok: false,
+    reason: 'terminal_not_found',
+    stderr: 'raw osascript detail',
+    pid: 1234,
+    [marker]: 'private',
+  }).perform('approve', 's-1');
+
+  assert.deepEqual(result, { ok: false, reason: 'terminal_not_found' });
+  assert.deepEqual(Object.keys(result).sort(), ['ok', 'reason']);
+  assert.deepEqual(Object.getOwnPropertySymbols(result), []);
+  assert.ok(!JSON.stringify(result).includes('raw osascript detail'));
+});
+
+test('success is normalized to exactly { ok: true }', async () => {
+  const result = await serviceReturning({
+    ok: true,
+    reason: 'unsupported',
+    extra: 'must not travel',
+  }).perform('focus', 's-1');
+
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(Object.keys(result), ['ok']);
+});
+
+test('an adapter answer that is not a result object is refused', async () => {
+  for (const answer of [undefined, null, 'ok', 42, [], () => {}, { ok: 'true' }, { ok: 1 }]) {
+    const result = await serviceReturning(answer).perform('focus', 's-1');
+    assert.deepEqual(
+      result,
+      { ok: false, reason: 'unsupported' },
+      `${String(answer)} must not cross the boundary`,
+    );
+  }
 });

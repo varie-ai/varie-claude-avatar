@@ -37,16 +37,43 @@ export function isValidSessionId(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+const TERMINAL_ACTION_REASONS: readonly string[] = [
+  'unsupported',
+  'session_not_found',
+  'terminal_not_found',
+  'automation_denied',
+];
+
+/**
+ * Runtime guard for the closed reason taxonomy.
+ *
+ * An adapter is not trusted to honour its declared types: a TypeScript cast is
+ * not validation, so anything outside these four strings is refused here.
+ */
+function isTerminalActionReason(
+  value: unknown
+): value is NonNullable<TerminalActionResult['reason']> {
+  return typeof value === 'string' && TERMINAL_ACTION_REASONS.includes(value);
+}
+
 /**
  * Reduces an adapter answer to the exact contract shape, so what crosses IPC is
  * always stable and serializable.
+ *
+ * Only a reason from the closed taxonomy survives; anything else — an unknown
+ * string, a non-string value, or no reason at all — becomes 'unsupported'. The
+ * returned object is rebuilt from scratch, so no adapter property travels on.
  */
 export function normalizeTerminalActionResult(value: unknown): TerminalActionResult {
   if (typeof value === 'object' && value !== null) {
     const candidate = value as TerminalActionResult;
     if (candidate.ok === true) return { ok: true };
     if (candidate.ok === false) {
-      return { ok: false, reason: candidate.reason ?? 'unsupported' };
+      const reason: unknown = candidate.reason;
+      return {
+        ok: false,
+        reason: isTerminalActionReason(reason) ? reason : 'unsupported',
+      };
     }
   }
   return { ok: false, reason: 'unsupported' };
