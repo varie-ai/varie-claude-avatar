@@ -6,6 +6,11 @@ import { SocketServer } from './socket-server';
 import { SessionTracker } from './session-tracker';
 import { StatsTracker } from './stats-tracker';
 import { MouseTracker } from './mouse-tracker';
+import {
+  createTerminalActionService,
+  registerTerminalActionIpc,
+} from './terminal-actions/create-terminal-actions';
+import type { TerminalActionService } from './terminal-actions/terminal-action-service';
 
 // Handle EPIPE errors globally - occurs when launching terminal closes
 // This prevents the "A JavaScript error occurred in the main process" dialog
@@ -100,6 +105,7 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let socketServer: SocketServer | null = null;
 let sessionTracker: SessionTracker | null = null;
+let terminalActions: TerminalActionService | null = null;
 let statsTracker: StatsTracker | null = null;
 let mouseTracker: MouseTracker | null = null;
 
@@ -334,9 +340,37 @@ function createWindow(): void {
   log('INFO', 'Window setup complete');
 }
 
+/**
+ * Locates the Windows tray icon inside the app bundle.
+ *
+ * Resolution is anchored to the app directory, never to process.cwd(), so it
+ * works both from a source checkout and from the packaged app (where the file
+ * lives inside app.asar).
+ */
+function resolveWindowsTrayIconPath(): string {
+  const candidates = [
+    path.join(app.getAppPath(), 'assets', 'icon.ico'),
+    path.join(__dirname, '..', '..', 'assets', 'icon.ico'),
+    path.join(process.resourcesPath || '', 'assets', 'icon.ico'),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // Unreadable candidate: keep looking.
+    }
+  }
+
+  return candidates[0];
+}
+
 function createTray(): void {
-  // Create a simple tray icon (16x16 template image for macOS)
-  const icon = nativeImage.createEmpty();
+  // Windows needs a real multi-resolution icon; macOS keeps its existing
+  // template image behaviour unchanged.
+  const icon = process.platform === 'win32'
+    ? nativeImage.createFromPath(resolveWindowsTrayIconPath())
+    : nativeImage.createEmpty();
   tray = new Tray(icon);
 
   const contextMenu = Menu.buildFromTemplate([
@@ -515,55 +549,6 @@ ipcMain.on('set-scale', (_, scale: number) => {
   log('INFO', `Window resized to ${newWidth}x${newHeight}`);
 });
 
-// Send approval to terminal
-ipcMain.on('send-approval', (_, sessionId: string) => {
-  log('INFO', '*** IPC RECEIVED: send-approval ***');
-  log('INFO', 'Sending approval to terminal, session:', sessionId);
-
-  const { exec } = require('child_process');
-  const { clipboard } = require('electron');
-
-  // Copy 'y' to clipboard as backup
-  clipboard.writeText('y');
-
-  // AppleScript to activate terminal and press Enter to approve
-  // Claude Code usually just needs Enter to confirm
-  const script = `
-    tell application "System Events"
-      set termApps to {"iTerm2", "iTerm", "Terminal"}
-      set foundApp to ""
-      repeat with appName in termApps
-        if exists (application process appName) then
-          set foundApp to appName as string
-          exit repeat
-        end if
-      end repeat
-
-      if foundApp is "" then
-        set foundApp to "Terminal"
-      end if
-
-      -- Activate the terminal and bring to front
-      tell application foundApp
-        activate
-        delay 0.15
-      end tell
-
-      -- Send Enter to approve (Claude Code default)
-      keystroke return
-    end tell
-  `;
-
-  exec(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, (error: Error | null, stdout: string, stderr: string) => {
-    if (error) {
-      log('WARN', 'Could not send keystroke to terminal:', error.message);
-      log('WARN', 'stderr:', stderr);
-    } else {
-      log('INFO', 'Approval sent: pressed Enter in terminal');
-    }
-  });
-});
-
 // Extend app type to include isQuitting
 declare module 'electron' {
   interface App {
@@ -578,6 +563,17 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   startServices();
+
+  // One service instance for the whole lifecycle; the platform decides the
+  // adapter, and Windows gets the inert one.
+  terminalActions = createTerminalActionService(process.platform, {
+    log: (level, message) => log(level, message),
+  });
+  registerTerminalActionIpc({
+    ipcMain,
+    service: terminalActions,
+    findSession: (sessionId: string) => sessionTracker?.getSession(sessionId),
+  });
 
   app.on('activate', () => {
     log('INFO', 'App activate event');

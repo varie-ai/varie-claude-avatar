@@ -5,12 +5,16 @@ on:
     tags:
       - 'v*'
 
+# Least privilege by default. Only the job that creates the GitHub Release
+# raises this to contents: write; the build jobs never write to the repository.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-mac:
     runs-on: macos-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         arch: [arm64, x64]
@@ -52,28 +56,111 @@ jobs:
             daemon/release/*-mac.zip
           if-no-files-found: error
 
-  release:
-    needs: build-mac
-    runs-on: ubuntu-latest
+  build-win:
+    runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: daemon/package-lock.json
+
+      - name: Install dependencies
+        working-directory: daemon
+        run: npm ci
+
+      # No shell glob: the runner walks tests/node itself, which is the only
+      # form that behaves identically under bash and PowerShell.
+      - name: Run root test suite
+        run: node tests/node/run-tests.cjs
+
+      - name: Run daemon test script
+        working-directory: daemon
+        run: npm test
+
+      - name: Build
+        working-directory: daemon
+        run: npm run build
+
+      - name: Package Windows x64
+        working-directory: daemon
+        run: npx electron-builder --win --x64 --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The two families are uploaded separately and named after the target, so
+      # a missing family fails its own step instead of silently shrinking the
+      # release. The patterns are disjoint: neither can pick up the other.
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-x64-setup
+          path: daemon/release/*-win-x64-setup.exe
+          if-no-files-found: error
+
+      - name: Upload Windows portable
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-x64-portable
+          path: daemon/release/*-win-x64-portable.exe
+          if-no-files-found: error
+
+  release:
+    needs: [build-mac, build-win]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Each artifact is restored into its own directory, so two families can
+      # never overwrite one another on the way in.
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: List artifacts
-        run: find artifacts -type f | sort
+      # This job runs on Ubuntu, so POSIX tooling is safe here and only here.
+      - name: Verify every artifact family is present
+        run: |
+          set -euo pipefail
+          missing=0
+          for pattern in '*.dmg' '*-mac.zip' '*-win-x64-setup.exe' '*-win-x64-portable.exe'; do
+            found=$(find artifacts -type f -name "$pattern" | sort)
+            if [ -z "$found" ]; then
+              echo "MISSING FAMILY: $pattern"
+              missing=1
+            else
+              echo "$pattern"
+              echo "$found" | sed 's/^/  /'
+            fi
+          done
+          collisions=$(find artifacts -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' \) -printf '%f\n' | sort | uniq -d)
+          if [ -n "$collisions" ]; then
+            echo "COLLIDING BASENAMES (a release would publish only one of each):"
+            echo "$collisions"
+            missing=1
+          fi
+          exit "$missing"
+
+      - name: Record artifact checksums
+        run: find artifacts -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' \) -print0 | xargs -0 sha256sum
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           draft: false
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             artifacts/**/*.dmg
             artifacts/**/*.zip
+            artifacts/**/*.exe
           body: |
             ## Varie Claude Avatar ${{ github.ref_name }}
 
@@ -84,13 +171,25 @@ jobs:
                /plugin marketplace add https://github.com/varie-ai/varie-claude-avatar
                /plugin install varie-avatar@varie-avatar-local
                ```
-            2. The daemon downloads automatically on your first session. Or download manually below.
+            2. The desktop app downloads automatically on your first session. Or download it manually below.
 
             ### Downloads
 
-            - **macOS (Apple Silicon):** `*-arm64.dmg`
-            - **macOS (Intel):** `*-x64.dmg`
+            - **Windows 10 1809+ / Windows 11 (x64) — installer:** `*-win-x64-setup.exe`
+              One-click, per-user, installs into `%LOCALAPPDATA%\Programs\Varie Claude Avatar`.
+            - **Windows 10 1809+ / Windows 11 (x64) — portable:** `*-win-x64-portable.exe`
+              Runs without installing.
+            - **macOS (Apple Silicon):** the `.dmg` ending in `-arm64.dmg`
+            - **macOS (Intel):** the `.dmg` with no architecture suffix
 
-            This build is code-signed. If macOS blocks it on first launch:
+            ### Windows SmartScreen
+
+            Windows builds are not code-signed yet. Microsoft Defender SmartScreen may show
+            "Windows protected your PC" the first time you run the installer or the portable
+            executable: choose **More info**, then **Run anyway**.
+
+            ### macOS Gatekeeper
+
+            macOS builds are code-signed. If macOS still blocks the app on first launch:
             - **macOS 14 and earlier:** Right-click the app → Open → click Open
             - **macOS 15 (Sequoia):** System Settings → Privacy & Security → "Open Anyway"

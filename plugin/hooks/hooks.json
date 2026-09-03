@@ -5,8 +5,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-daemon-running && ${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify session-start",
-            "timeout": 5000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "session-start",
+              "--ensure"
+            ],
+            "timeout": 5
           }
         ]
       }
@@ -16,8 +21,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify session-end",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "session-end"
+            ],
+            "timeout": 1
           }
         ]
       }
@@ -28,8 +37,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify approval-needed --tool $TOOL_NAME",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "approval-needed"
+            ],
+            "timeout": 1
           }
         ]
       },
@@ -38,8 +51,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify question --tool $TOOL_NAME",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "question"
+            ],
+            "timeout": 1
           }
         ]
       }
@@ -50,8 +67,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify tool-complete --tool $TOOL_NAME",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "tool-complete"
+            ],
+            "timeout": 1
           }
         ]
       },
@@ -60,8 +81,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify plan-complete --tool Plan",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "plan-complete"
+            ],
+            "timeout": 1
           }
         ]
       },
@@ -70,8 +95,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify question-complete --tool Question",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "question-complete"
+            ],
+            "timeout": 1
           }
         ]
       }
@@ -82,8 +111,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify approval-needed --tool Plan",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "approval-needed"
+            ],
+            "timeout": 1
           }
         ]
       }
@@ -93,8 +126,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify subagent-start",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "subagent-start"
+            ],
+            "timeout": 1
           }
         ]
       }
@@ -104,8 +141,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify stop",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "stop"
+            ],
+            "timeout": 1
           }
         ]
       }
@@ -115,8 +156,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify subagent-stop",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "subagent-stop"
+            ],
+            "timeout": 1
           }
         ]
       }
@@ -126,8 +171,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify user-prompt",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "user-prompt"
+            ],
+            "timeout": 1
           }
         ]
       }
@@ -138,8 +187,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-notify notification --message \"$MESSAGE\"",
-            "timeout": 1000
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/varie-avatar-hook.cjs",
+              "notification"
+            ],
+            "timeout": 1
           }
         ]
       }

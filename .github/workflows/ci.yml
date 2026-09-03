@@ -6,15 +6,35 @@ on:
     paths:
       - 'daemon/**'
       - 'plugin/**'
+      - 'shared/**'
+      - 'tests/**'
+      - 'README.md'
+      - 'docs/windows-release-checklist.md'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
   pull_request:
     branches: [main]
     paths:
       - 'daemon/**'
       - 'plugin/**'
+      - 'shared/**'
+      - 'tests/**'
+      - 'README.md'
+      - 'docs/windows-release-checklist.md'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,16 +49,36 @@ jobs:
         working-directory: daemon
         run: npm ci
 
+      # The runner discovers tests/node itself and runs them with
+      # --test-concurrency=1. A shell glob such as tests/node/*.test.cjs is
+      # expanded by bash on macOS but handed to node unexpanded by PowerShell on
+      # Windows, so it must never appear in a cross-platform step.
+      - name: Run root test suite
+        run: node tests/node/run-tests.cjs
+
+      # The same suite, invoked the way a daemon developer invokes it. It costs
+      # little and proves the relative path inside daemon/package.json still
+      # resolves from the daemon working directory.
+      - name: Run daemon test script
+        working-directory: daemon
+        run: npm test
+
       - name: Build
         working-directory: daemon
         run: npm run build
 
+      # macOS only. These are the deprecated shell wrappers: they are executed
+      # only on macOS, and Windows checkouts have no executable bit to check.
       - name: Verify plugin scripts are executable
+        if: runner.os == 'macOS'
         run: |
           test -x plugin/scripts/ensure-daemon-running
           test -x plugin/scripts/install-daemon
           test -x plugin/scripts/varie-avatar-notify
           echo "All plugin scripts are executable"
 
+      # Node, not Python: the Windows runner has no guaranteed python3 on PATH.
+      # The expression avoids the dollar sign and the backtick so it survives
+      # both bash and PowerShell quoting unchanged.
       - name: Verify hooks.json is valid JSON
-        run: python3 -c "import json; json.load(open('plugin/hooks/hooks.json'))"
+        run: node -e "const fs=require('node:fs');const parsed=JSON.parse(fs.readFileSync('plugin/hooks/hooks.json','utf8'));if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)){throw new Error('hooks.json must be a JSON object')}console.log('hooks.json is valid JSON')"
